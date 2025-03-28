@@ -6,7 +6,7 @@
 /// // Create a simple node
 /// let my_node = node_impl! {
 ///     name: "MyNode",
-///     exec: |_prep_res| {
+///     exec: |_prep_res: &Value| {
 ///         println!("Node is executing!");
 ///         Ok(Value::Null)
 ///     }
@@ -34,9 +34,8 @@ macro_rules! node_impl {
 
         impl GeneratedNode {
             fn new(name: impl Into<String>) -> Self {
-                let mut base = BaseNode::new(name);
-                $(base = base.with_max_retries($retries);)?
-                $(base = base.with_wait_duration($wait);)?
+                let base = BaseNode::new(name);
+                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
                 Self { base }
             }
         }
@@ -61,7 +60,8 @@ macro_rules! node_impl {
         impl SyncNode for GeneratedNode {
             #[allow(unused_variables)]
             fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
-                $(return ($prep_fn)(shared);)?
+                $(let result = ($prep_fn)(shared);
+                return result;)?
                 Ok(Value::Null)
             }
 
@@ -71,100 +71,13 @@ macro_rules! node_impl {
 
             #[allow(unused_variables)]
             fn post(&mut self, shared: &mut Shared, prep_res: &Value, exec_res: &Value) -> NodeResult<Value> {
-                $(return ($post_fn)(shared, prep_res, exec_res);)?
+                $(let result = ($post_fn)(shared, prep_res, exec_res);
+                return result;)?
                 Ok(Value::Null)
             }
         }
 
         $crate::sync::node(GeneratedNode::new($name))
-    }}
-}
-
-/// Macro to simplify creating an async node with minimal boilerplate
-///
-/// # Examples
-///
-/// ```rust
-/// // Create a simple async node
-/// let my_async_node = async_node_impl! {
-///     name: "MyAsyncNode",
-///     exec_async: async |_prep_res| {
-///         tokio::time::sleep(Duration::from_millis(100)).await;
-///         println!("Async node is executing!");
-///         Ok(Value::Null)
-///     }
-/// };
-/// ```
-#[macro_export]
-macro_rules! async_node_impl {
-    (
-        name: $name:expr,
-        $(prep_async: $prep_fn:expr,)?
-        exec_async: $exec_fn:expr
-        $(, post_async: $post_fn:expr)?
-        $(, max_retries: $retries:expr)?
-        $(, wait_duration: $wait:expr)?
-        $(,)?
-    ) => {{
-        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
-        use $crate::async_node::AsyncNode;
-        use serde_json::Value;
-        use std::collections::HashMap;
-        use std::time::Duration;
-        use async_trait::async_trait;
-
-        struct GeneratedAsyncNode {
-            base: BaseNode,
-        }
-
-        impl GeneratedAsyncNode {
-            fn new(name: impl Into<String>) -> Self {
-                let mut base = BaseNode::new(name);
-                $(base = base.with_max_retries($retries);)?
-                $(base = base.with_wait_duration($wait);)?
-                Self { base }
-            }
-        }
-
-        impl Node for GeneratedAsyncNode {
-            fn get_params(&self) -> &Params { &self.base.get_params() }
-            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
-            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
-                self.base.add_successor(action, successor);
-            }
-            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
-                self.base.get_successors()
-            }
-            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
-                self.base.get_successors_mut()
-            }
-            fn get_name(&self) -> &str { self.base.get_name() }
-            fn get_max_retries(&self) -> usize { self.base.get_max_retries() }
-            fn get_wait_duration(&self) -> Duration { self.base.get_wait_duration() }
-        }
-
-        impl SyncNode for GeneratedAsyncNode {}
-
-        #[async_trait]
-        impl AsyncNode for GeneratedAsyncNode {
-            #[allow(unused_variables)]
-            async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
-                $(return ($prep_fn)(shared).await;)?
-                Ok(Value::Null)
-            }
-
-            async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-                ($exec_fn)(prep_res).await
-            }
-
-            #[allow(unused_variables)]
-            async fn post_async(&mut self, shared: &mut Shared, prep_res: &Value, exec_res: &Value) -> NodeResult<Value> {
-                $(return ($post_fn)(shared, prep_res, exec_res).await;)?
-                Ok(Value::Null)
-            }
-        }
-
-        $crate::sync::node(GeneratedAsyncNode::new($name))
     }}
 }
 
@@ -182,12 +95,12 @@ macro_rules! async_node_impl {
 /// // Create a more complex flow with branches
 /// let flow = flow! {
 ///     name: "BranchingFlow",
-///     start: start_node,
+///     start: start_node.clone(),
 ///     connections: [
-///         (start_node, "path1", path1_node),
-///         (start_node, "path2", path2_node),
-///         (path1_node, "default", end_node),
-///         (path2_node, "default", end_node)
+///         (start_node.clone(), "path1", path1_node.clone()),
+///         (start_node.clone(), "path2", path2_node.clone()),
+///         (path1_node.clone(), "default", end_node.clone()),
+///         (path2_node.clone(), "default", end_node.clone())
 ///     ]
 /// };
 /// ```
@@ -225,53 +138,6 @@ macro_rules! flow {
     }};
 }
 
-/// Macro to create an async flow with connected nodes
-///
-/// # Examples
-///
-/// ```rust
-/// // Create a linear async flow
-/// let flow = async_flow! {
-///     name: "SimpleAsyncFlow",
-///     nodes: [node1, node2, node3]
-/// };
-/// ```
-#[macro_export]
-macro_rules! async_flow {
-    // Simple linear flow
-    (
-        name: $name:expr,
-        nodes: [$first:expr $(, $rest:expr)+]
-    ) => {{
-        use $crate::sync::then;
-        use $crate::async_node::AsyncFlow;
-
-        let first_node = $first;
-        $(
-            let _ = then(&first_node, $rest);
-        )*
-
-        AsyncFlow::new($name, first_node)
-    }};
-
-    // Flow with explicit connections
-    (
-        name: $name:expr,
-        start: $start:expr,
-        connections: [$(($from:expr, $action:expr, $to:expr)),+ $(,)?]
-    ) => {{
-        use $crate::sync::when;
-        use $crate::async_node::AsyncFlow;
-
-        let start_node = $start;
-        $(
-            let _ = when(&$from, $action).then($to);
-        )+
-
-        AsyncFlow::new($name, start_node)
-    }};
-}
-
 /// Macro to create a simple decision node
 ///
 /// # Examples
@@ -283,12 +149,12 @@ macro_rules! async_flow {
 ///     condition: |params, shared| {
 ///         if let Some(Value::Number(age)) = shared.get("age") {
 ///             if age.as_u64().unwrap_or(0) >= 18 {
-///                 "adult"
+///                 "adult".to_string()
 ///             } else {
-///                 "minor"
+///                 "minor".to_string()
 ///             }
 ///         } else {
-///             "unknown"
+///             "unknown".to_string()
 ///         }
 ///     }
 /// };
@@ -317,9 +183,8 @@ macro_rules! decision_node {
                 name: impl Into<String>,
                 condition: impl Fn(&Params, &Shared) -> String + Send + 'static
             ) -> Self {
-                let mut base = BaseNode::new(name);
-                $(base = base.with_max_retries($retries);)?
-                $(base = base.with_wait_duration($wait);)?
+                let base = BaseNode::new(name);
+                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
                 Self {
                     base,
                     condition: Box::new(condition),
@@ -365,9 +230,9 @@ macro_rules! decision_node {
 /// let processor = processing_chain! {
 ///     name: "DataProcessor",
 ///     steps: [
-///         |data| { /* transformation 1 */ Ok(data) },
-///         |data| { /* transformation 2 */ Ok(data) },
-///         |data| { /* transformation 3 */ Ok(data) }
+///         |data: &Value| { /* transformation 1 */ Ok(data.clone()) },
+///         |data: &Value| { /* transformation 2 */ Ok(data.clone()) },
+///         |data: &Value| { /* transformation 3 */ Ok(data.clone()) }
 ///     ]
 /// };
 /// ```
@@ -392,9 +257,8 @@ macro_rules! processing_chain {
 
         impl ProcessingChain {
             fn new(name: impl Into<String>) -> Self {
-                let mut base = BaseNode::new(name);
-                $(base = base.with_max_retries($retries);)?
-                $(base = base.with_wait_duration($wait);)?
+                let base = BaseNode::new(name);
+                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
                 Self {
                     base,
                     steps: Vec::new()
@@ -424,6 +288,15 @@ macro_rules! processing_chain {
         }
 
         impl SyncNode for ProcessingChain {
+            fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+                // Get input data from shared state
+                if let Some(input) = shared.get("input") {
+                    Ok(input.clone())
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+
             fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
                 let mut current = prep_res.clone();
 

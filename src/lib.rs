@@ -1,5 +1,6 @@
 pub mod async_node;
 pub mod macros;
+pub mod macros_tests;
 pub mod sync;
 
 // Re-export common types for convenience

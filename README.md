@@ -375,6 +375,68 @@ RPocketFlow is structured around key components:
 • **Node Traits:** The `Node` trait is extended by `SyncNode` for synchronous operations and `AsyncNode` for asynchronous tasks, with `BaseNode` providing a default implementation.  
 • **Workflow Orchestration:** `Flow` and `AsyncFlow` manage the execution order, shared state, and error recovery across nodes.
 
+
+Based on the fixes we made during testing, it would be good to update a few parts of the README.md to reflect the lessons learned and ensure users follow best practices. Here are the key points that should be updated:
+
+1. **Arc<Mutex<>> and Cloning**: Add a note about the need to clone nodes when using them multiple times in flow connections.
+
+2. **JSON Number Handling**: Add a tip about comparing JSON number values in a type-flexible way.
+
+3. **Update Macro Examples**: Ensure all examples in the README include proper type annotations.
+
+Here are the specific sections I would add to the README:
+
+```markdown
+### Important Usage Notes
+
+#### Cloning Nodes in Flow Connections
+
+When connecting nodes in a flow, especially with the branching pattern, remember to clone the node references when using them multiple times:
+
+```rust
+let flow = flow! {
+    name: "BranchingFlow",
+    start: decision_node.clone(),
+    connections: [
+        (decision_node.clone(), "path1", path1_node.clone()),
+        (decision_node.clone(), "path2", path2_node.clone()),
+        (path1_node.clone(), "default", end_node.clone())
+    ]
+};
+```
+
+This is necessary because `Arc<Mutex<>>` values are moved when used, so cloning ensures you can reuse the references.
+
+#### Working with JSON Numbers
+
+When processing numeric values with the JSON library, be aware that numbers can be represented as either integers or floats. For robust comparisons:
+
+```rust
+// Instead of direct equality which may fail due to different number representations:
+assert_eq!(result, json!(20));  // May fail if result is 20.0
+
+// Use a more flexible approach:
+assert!(
+    (result.as_i64() == Some(20)) || 
+    (result.as_f64() == Some(20.0))
+);
+```
+
+#### Type Annotations in Closures
+
+Always include type annotations in closures to avoid compilation errors:
+
+```rust
+let node = node_impl! {
+    name: "ProcessingNode",
+    exec: |data: &Value| {  // Type annotation is important
+        // Processing logic
+        Ok(json!(result))
+    }
+};
+```
+```
+
 #### License
 
 RPocketFlow is licensed under the MIT License.
