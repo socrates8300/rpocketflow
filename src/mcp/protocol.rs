@@ -368,9 +368,14 @@ impl Drop for MCPProtocolNode {
     }
 }
 
-// Send and Sync are safe because we're using mpsc channels and tokio
-unsafe impl Send for MCPProtocolNode {}
-unsafe impl Sync for MCPProtocolNode {}
+// MCPProtocolNode is already Send and Sync:
+// - BaseNode is Send + Sync
+// - MCPClientConfig is Clone and all fields are Send + Sync
+// - Option<T> is Send + Sync if T is Send + Sync
+// - Child is explicitly Send + Sync (documented in std)
+// - HashMap<String, String> is Send + Sync
+// - u64 is Send + Sync
+// The manual impls are not needed
 
 impl Node for MCPProtocolNode {
     fn get_params(&self) -> &Params {

@@ -1,3 +1,4 @@
+#![allow(unused)]
 #[cfg(test)]
 mod tests {
     use crate::*;
@@ -310,7 +311,10 @@ mod tests {
 
         // Should fail at step 2
         assert!(exec_result2.is_err());
-        assert!(exec_result2.unwrap_err().to_string().contains("Missing 'value' field"));
+        assert!(exec_result2
+            .unwrap_err()
+            .to_string()
+            .contains("Missing 'value' field"));
 
         // Test with non-numeric value
         let mut shared3 = HashMap::new();
@@ -321,6 +325,9 @@ mod tests {
 
         // Should fail at step 3
         assert!(exec_result3.is_err());
-        assert!(exec_result3.unwrap_err().to_string().contains("Value is not numeric"));
+        assert!(exec_result3
+            .unwrap_err()
+            .to_string()
+            .contains("Value is not numeric"));
     }
 }

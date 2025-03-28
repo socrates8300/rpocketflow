@@ -1,7 +1,7 @@
+#![allow(unused)]
 use log::{error, info};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Stdio};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = std::io::stdin();
     let mut stdin = BufReader::new(stdin);
     let mut stdout = std::io::stdout();
-    
+
     // Server info
     let server_info = json!({
         "jsonrpc": "2.0",
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         "id": 1
     });
-    
+
     // Register available tools
     let tools = json!({
         "echo": {
@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     info!("Starting MCP server...");
-    
+
     // Receive messages and respond
     let mut buffer = String::new();
     loop {
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // EOF reached
             break;
         }
-        
+
         // Parse the message
         let message: Value = match serde_json::from_str(&buffer) {
             Ok(msg) => msg,
@@ -87,18 +87,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
         };
-        
+
         info!("Received message: {}", message);
-        
+
         // Process message based on method
         let method = message.get("method").and_then(|m| m.as_str());
         let id = message.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
-        
+
         let response = match method {
             Some("initialize") => {
                 info!("Processing initialize request");
                 server_info.clone()
-            },
+            }
             Some("tools/list") => {
                 info!("Processing tools/list request");
                 json!({
@@ -117,15 +117,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     "id": id
                 })
-            },
+            }
             Some("echo") => {
-                let message = message.get("params")
+                let message = message
+                    .get("params")
                     .and_then(|p| p.get("message"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("No message provided");
-                
+
                 info!("Echo handler called with message: {}", message);
-                
+
                 json!({
                     "jsonrpc": "2.0",
                     "result": {
@@ -133,20 +134,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     "id": id
                 })
-            },
+            }
             Some("add") => {
-                let a = message.get("params")
+                let a = message
+                    .get("params")
                     .and_then(|p| p.get("a"))
                     .and_then(|a| a.as_f64())
                     .unwrap_or(0.0);
-                
-                let b = message.get("params")
+
+                let b = message
+                    .get("params")
                     .and_then(|p| p.get("b"))
                     .and_then(|b| b.as_f64())
                     .unwrap_or(0.0);
-                
+
                 info!("Add handler called with a={}, b={}", a, b);
-                
+
                 let sum = a + b;
                 json!({
                     "jsonrpc": "2.0",
@@ -155,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     "id": id
                 })
-            },
+            }
             Some("shutdown") => {
                 info!("Processing shutdown request");
                 json!({
@@ -163,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "result": null,
                     "id": id
                 })
-            },
+            }
             _ => {
                 error!("Unknown method: {:?}", method);
                 json!({
@@ -176,18 +179,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
             }
         };
-        
+
         // Send the response
         let response_str = serde_json::to_string(&response).unwrap();
         writeln!(stdout, "{}", response_str).unwrap();
         stdout.flush().unwrap();
-        
+
         // If shutdown was called, exit the loop
         if method == Some("shutdown") {
             break;
         }
     }
-    
+
     info!("Shutting down MCP server");
     Ok(())
 }
+
