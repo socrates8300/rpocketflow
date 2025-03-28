@@ -285,6 +285,40 @@ registry.register(weather_tool);
 // (See the full example in examples/mcp_example.rs)
 ```
 
+#### MCP Integration: Troubleshooting
+
+If you encounter issues with the MCP integration, here are some common problems and solutions:
+
+##### Connection Issues
+
+If you're having trouble connecting to MCP servers:
+
+1. **Verify MCP Server Availability**:
+   - For local MCP servers, check that the server is running and accessible
+   - When using custom MCP servers, verify they're running on the expected port
+
+2. **MCP Server vs. MCP Tool Differences**:
+   - Note that tools like `tavily-mcp` may run over stdio, not a network port
+   - Ensure your application configures the correct connection method (stdio vs. HTTP)
+
+3. **Environment Configuration**:
+   - Use the `.env` file and the `dotenv` crate to manage API keys and server URLs
+   - Set `MCP_SERVER_URL` for HTTP connections or configure stdio appropriately
+
+##### Common Errors
+
+1. **No MCP Output**:
+   - If `shared.get("mcp_output")` returns none, check if the MCP server is responding
+   - Add a wait time after MCP node execution to give servers time to respond
+
+2. **Node Environment Capture Issues**:
+   - When using closures in node definitions that capture environment variables, use hardcoded values or `move |...| {}` closures
+   - The `node_impl!` and `async_node_impl!` macros have limitations with captured environment variables
+
+3. **API Key Configuration**:
+   - Always check that API keys are properly loaded before initiating MCP connections
+   - Use `dotenv().ok();` at the start of your application to load environment variables
+
 #### Macros for Simplified Usage
 
 RPocketFlow includes several macros that help reduce boilerplate and streamline common tasks when defining nodes and flows.
@@ -435,6 +469,137 @@ impl SyncNode for CustomNode {
         // Custom post-processing logic
         Ok(Value::Null)
     }
+}
+```
+
+#### Best Practices for RPocketFlow Applications
+
+##### Environment Setup
+
+- **Environment Variables**: Always use a `.env` file with the `dotenv` crate for configuration
+- **API Key Management**: Load and validate API keys early in the application lifecycle
+- **Logging**: Configure proper logging to help diagnose flow execution issues
+
+##### Error Handling
+
+- Add appropriate timeouts when waiting for external services
+- Include fallback behavior when external services (like MCP servers) are unavailable
+- When using tool integrations, implement proper error handling for API calls
+
+##### Testing MCP Integrations
+
+Before building complex workflows with MCP:
+
+1. Create a simple test application to verify MCP server connectivity
+2. Test individual tools separately to ensure they work as expected
+3. Start with minimal flows and add complexity incrementally
+
+#### Alternative Implementation: Direct API Integration
+
+If you're experiencing issues with MCP tool integration or prefer direct API control, you can implement your own API clients within RPocketFlow:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use reqwest::blocking::Client;
+use std::collections::HashMap;
+use std::env;
+use dotenv::dotenv;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load environment variables
+    dotenv().ok();
+
+    // Get API key
+    let api_key = env::var("WEATHER_API_KEY")
+        .expect("API key must be set in .env file");
+
+    // Create a client wrapper closure
+    let weather_client = move |location: &str| -> Result<serde_json::Value, String> {
+        let url = format!(
+            "https://api.example.com/weather?location={}&appid={}",
+            location, api_key
+        );
+
+        match Client::new().get(&url).send() {
+            Ok(response) => {
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>() {
+                        Ok(data) => Ok(data),
+                        Err(e) => Err(format!("Failed to parse response: {}", e))
+                    }
+                } else {
+                    Err(format!("API error: {}", response.status()))
+                }
+            },
+            Err(e) => Err(format!("Request failed: {}", e))
+        }
+    };
+
+    // Create RPocketFlow nodes
+    let input_node = node_impl! {
+        name: "InputNode",
+        exec: |_| {
+            // In a real app, get this from user input
+            Ok(json!("New York"))
+        }
+    };
+
+    // Create API node with the client
+    let api_key_for_node = api_key.clone(); // Clone for capture
+    let weather_node = node_impl! {
+        name: "WeatherNode",
+        exec: |input| {
+            let location = input.as_str().unwrap_or("unknown");
+
+            // Direct API call (simplified example)
+            let url = format!(
+                "https://api.example.com/weather?location={}&appid={}",
+                location, api_key_for_node
+            );
+
+            match reqwest::blocking::get(&url) {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        match response.json::<serde_json::Value>() {
+                            Ok(data) => Ok(data),
+                            Err(e) => Err(format!("Failed to parse response: {}", e))
+                        }
+                    } else {
+                        Err(format!("API error: {}", response.status()))
+                    }
+                },
+                Err(e) => Err(format!("Request failed: {}", e))
+            }
+        }
+    };
+
+    let output_node = node_impl! {
+        name: "OutputNode",
+        exec: |weather_data| {
+            println!("Weather data: {}", weather_data);
+            Ok(json!(null))
+        }
+    };
+
+    // Connect nodes
+    let flow = flow! {
+        name: "WeatherFlow",
+        start: input_node.clone(),
+        connections: [
+            (input_node.clone(), "default", weather_node.clone()),
+            (weather_node.clone(), "default", output_node.clone())
+        ]
+    };
+
+    // Run the flow
+    let mut shared = HashMap::new();
+    match flow.orchestrate(&mut shared, None) {
+        Ok(_) => println!("Flow completed successfully"),
+        Err(e) => eprintln!("Flow failed: {}", e),
+    }
+
+    Ok(())
 }
 ```
 
