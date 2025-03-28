@@ -190,12 +190,15 @@ async fn main() {
     let node_b = async_node(AsyncWaitNode::new("B", "Finished B", 50));
     let node_c = async_node(AsyncWaitNode::new("C", "Finished C", 75));
 
-    // Build the async flow structure using the macro's `nodes` variant
-    // The macro handles the `async_then().await` calls internally.
+    // Build the async flow structure
     let flow = async_flow! {
         name: "SimpleAsyncFlow",
-        nodes: [node_a.clone(), node_b.clone(), node_c.clone()] // Macro connects these linearly
+        start: node_a.clone()
     };
+    
+    // Connect the nodes with async_then
+    async_then(&node_a, node_b.clone()).await;
+    async_then(&node_b, node_c.clone()).await;
 
     // Run the flow
     let mut shared_state = HashMap::new();
@@ -301,8 +304,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build the AsyncFlow
     let flow = async_flow! {
         name: "AsyncClaudeQA",
-        nodes: [input_node.clone(), claude_node.clone(), output_node.clone()]
+        start: input_node.clone()
     };
+    
+    // Connect the nodes with async_then
+    async_then(&input_node, claude_node.clone()).await;
+    async_then(&claude_node, output_node.clone()).await;
 
     // Run the AsyncFlow
     let mut shared = HashMap::new();
@@ -424,17 +431,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protocol_node = mcp_protocol_node("MCPClient", mcp_config); // Returns AsyncNodeRef
     let display_node = async_node(DisplayMcpResultNode::new());
 
-    // Build AsyncFlow using connections
+    // Build AsyncFlow
     let flow = async_flow! {
         name: "AsyncMCPProtocolFlow",
-        start: prep_node.clone(),
-        connections: [
-            (prep_node.clone(), "default", protocol_node.clone()),
-            // MCPProtocolNode returns "success" or "error" actions
-            (protocol_node.clone(), "success", display_node.clone()),
-            (protocol_node.clone(), "error", display_node.clone()) // Also display errors
-        ]
+        start: prep_node.clone()
     };
+    
+    // Connect nodes manually
+    async_when(&prep_node, "default").then(protocol_node.clone()).await;
+    // MCPProtocolNode returns "success" or "error" actions
+    async_when(&protocol_node, "success").then(display_node.clone()).await;
+    async_when(&protocol_node, "error").then(display_node.clone()).await; // Also display errors
 
      // Run the AsyncFlow
     let mut shared = HashMap::new();
@@ -535,22 +542,14 @@ tool_registry.register(weather_tool);
 
 let flow = async_flow! {
     name: "AsyncClaudeWithTools",
-    start: input_node.clone(),
-    connections: [
-        // Input -> Claude
-        (input_node.clone(), "default", claude_node.clone()),
-
-        // Claude decides to use a tool -> Tool Handler Node
-        // Action name must match the tool name!
-        (claude_node.clone(), "get_current_weather", async_weather_tool_node.clone()),
-
-        // Tool Handler finishes -> Back to Claude with results
-        (async_weather_tool_node.clone(), "tool_done", claude_node.clone()),
-
-        // Claude gives final answer -> Output
-        (claude_node.clone(), "default", output_node.clone())
-    ]
+    start: input_node.clone()
 };
+
+// Connect nodes manually with async_then and async_when
+async_then(&input_node, claude_node.clone()).await;
+async_when(&claude_node, "get_current_weather").then(async_weather_tool_node.clone()).await;
+async_when(&async_weather_tool_node, "tool_done").then(claude_node.clone()).await;
+async_when(&claude_node, "default").then(output_node.clone()).await;
 
 // --- Run the Flow ---
 let mut shared = HashMap::new();
@@ -592,12 +591,15 @@ RPocketFlow includes macros to reduce boilerplate:
     // Branching sync flow
     let sync_branching = flow! { name: "SyncBranch", start: s_start, connections: [(s_start, "action", s_next)] };
     ```
-*   **`async_flow!` (for Asynchronous Flows):** Defines `AsyncFlow` structures. Requires `.await` during linking if not using `nodes:` variant. Must be called from an `async` context.
+*   **`async_flow!` (for Asynchronous Flows):** Defines `AsyncFlow` structures with a starting node. Node connections must be made with `async_then` and `async_when` functions (which must be `.await`ed). Must be called from an `async` context.
     ```rust
-    // Linear async flow (macro handles linking)
-    let async_linear = async_flow! { name: "AsyncSequence", nodes: [async1.clone(), async2.clone()] };
-    // Branching async flow (macro handles linking)
-    let async_branching = async_flow! { name: "AsyncBranch", start: a_start.clone(), connections: [(a_start.clone(), "action", a_next.clone())] };
+    // Linear async flow with manual linking
+    let async_linear = async_flow! { name: "AsyncSequence", start: async1.clone() };
+    async_then(&async1, async2.clone()).await; // Must be awaited
+    
+    // Branching async flow with manual linking
+    let async_branching = async_flow! { name: "AsyncBranch", start: a_start.clone() };
+    async_when(&a_start, "action").then(a_next.clone()).await; // Must be awaited
     // Manual linking (if needed) requires await
     // let async_manual_flow = async_flow! { name: "ManualLink", start: node_x.clone() };
     // async_then(&node_x, node_y.clone()).await;
@@ -691,7 +693,8 @@ impl SyncNode for MySyncTask { fn exec(&mut self, _:&Value) -> NodeResult<Value>
 let my_async_wrapped_node = async_node(SyncToAsyncNodeWrapper::new( MySyncTask::new() ));
 
 // 4. Use the wrapped node in AsyncFlow
-// let async_flow = async_flow!{ name: "MixedFlow", nodes: [start_async.clone(), my_async_wrapped_node.clone()] };
+// let async_flow = async_flow!{ name: "MixedFlow", start: start_async.clone() };
+// async_then(&start_async, my_async_wrapped_node.clone()).await;
 // async_flow.orchestrate(&mut shared, None).await;
 ```
 *(**Note:** Be mindful that the wrapped sync node will block the async thread it runs on.)*
