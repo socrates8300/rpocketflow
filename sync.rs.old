@@ -1,0 +1,717 @@
+use log::{debug, error, warn};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use thiserror::Error;
+
+/// Type alias for node parameters
+pub type Params = HashMap<String, Value>;
+
+/// Type alias for shared state between nodes
+pub type Shared = HashMap<String, Value>;
+
+/// Enum representing possible actions a node can take
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Action {
+    /// Default action for linear flows
+    Default,
+    /// Named action for branching flows
+    Named(String),
+    /// Terminate the flow
+    Terminate,
+}
+
+impl From<&Value> for Action {
+    fn from(value: &Value) -> Self {
+        if value.is_null() {
+            return Action::Default;
+        }
+
+        if let Some(s) = value.as_str() {
+            match s {
+                "terminate" => Action::Terminate,
+                _ => Action::Named(s.to_string()),
+            }
+        } else {
+            Action::Default
+        }
+    }
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Default => write!(f, "default"),
+            Action::Named(name) => write!(f, "{}", name),
+            Action::Terminate => write!(f, "terminate"),
+        }
+    }
+}
+
+/// Error type for node operations
+#[derive(Error, Debug)]
+pub enum NodeError {
+    #[error("prep error: {0}")]
+    PrepError(String),
+
+    #[error("exec error: {0}")]
+    ExecError(String),
+
+    #[error("post error: {0}")]
+    PostError(String),
+
+    #[error("retry error after {0} attempts: {1}")]
+    RetryError(usize, String),
+
+    #[error("flow error: {0}")]
+    FlowError(String),
+}
+
+/// Type alias for results from node operations
+pub type NodeResult<T> = Result<T, NodeError>;
+
+/// Type alias for a node reference
+pub type NodeRef = Arc<Mutex<dyn SyncNode>>;
+
+/// Base trait for all nodes in the system
+pub trait Node: Send + Sync {
+    /// Get the node's parameters
+    fn get_params(&self) -> &Params;
+
+    /// Set the node's parameters
+    fn set_params(&mut self, params: Params);
+
+    /// Get the node's successors
+    fn get_successors(&self) -> &HashMap<Action, NodeRef>;
+
+    /// Get mutable access to the node's successors
+    fn get_successors_mut(&mut self) -> &mut HashMap<Action, NodeRef>;
+
+    /// Add a successor for a specific action
+    fn add_successor(&mut self, action: Action, successor: NodeRef);
+
+    /// Get the node's name (for debugging and logging)
+    fn get_name(&self) -> &str;
+
+    /// Get the maximum number of retry attempts
+    fn get_max_retries(&self) -> usize;
+
+    /// Get the wait duration between retry attempts
+    fn get_wait_duration(&self) -> Duration;
+}
+
+/// Trait for synchronous nodes
+pub trait SyncNode: Node {
+    /// Preparation phase - fetches necessary data before execution
+    fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    /// Execution phase - performs the node's main functionality
+    fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    /// Post-processing phase - processes results and updates shared state
+    fn post(
+        &mut self,
+        shared: &mut Shared,
+        prep_res: &Value,
+        exec_res: &Value,
+    ) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    /// Fallback execution when retries are exhausted
+    fn exec_fallback(&mut self, prep_res: &Value, err: NodeError) -> NodeResult<Value> {
+        Err(err)
+    }
+
+    /// Internal execution method with retry logic
+    fn _exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        let max_retries = self.get_max_retries();
+
+        let mut last_error = None;
+
+        for attempt in 0..max_retries {
+            match self.exec(prep_res) {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    last_error = Some(e);
+
+                    if attempt + 1 < max_retries {
+                        let wait = self.get_wait_duration();
+                        if wait > Duration::from_secs(0) {
+                            debug!(
+                                "Node '{}' execution failed, retrying in {:?} (attempt {}/{})",
+                                self.get_name(),
+                                wait,
+                                attempt + 1,
+                                max_retries
+                            );
+                            std::thread::sleep(wait);
+                        }
+                    }
+                }
+            }
+        }
+
+        // All retries failed, call fallback
+        let err = last_error.unwrap_or_else(|| NodeError::ExecError("Unknown error".to_string()));
+        self.exec_fallback(prep_res, err)
+    }
+
+    /// Internal method to run the node through all phases
+    fn _run(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        let prep_res = self.prep(shared).map_err(|e| match e {
+            NodeError::PrepError(s) => NodeError::PrepError(s),
+            _ => NodeError::PrepError(format!("{}", e)),
+        })?;
+
+        let exec_res = self._exec(&prep_res)?;
+
+        let post_res = self
+            .post(shared, &prep_res, &exec_res)
+            .map_err(|e| match e {
+                NodeError::PostError(s) => NodeError::PostError(s),
+                _ => NodeError::PostError(format!("{}", e)),
+            })?;
+
+        Ok(Action::from(&post_res))
+    }
+
+    /// Run the node and return the next action
+    fn run(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        self._run(shared)
+    }
+}
+
+/// Base implementation of a node
+#[derive(Debug)]
+pub struct BaseNode {
+    /// Node name for debugging and logging
+    pub name: String,
+    /// Node parameters
+    pub params: Params,
+    /// Node successors mapped by action
+    pub successors: HashMap<Action, NodeRef>,
+    /// Maximum number of retry attempts
+    pub max_retries: usize,
+    /// Wait duration between retry attempts
+    pub wait_duration: Duration,
+}
+
+impl BaseNode {
+    /// Create a new BaseNode with default settings
+    pub fn new(name: impl Into<String>) -> Self {
+        BaseNode {
+            name: name.into(),
+            params: HashMap::new(),
+            successors: HashMap::new(),
+            max_retries: 1,
+            wait_duration: Duration::from_millis(0),
+        }
+    }
+
+    /// Set the maximum number of retry attempts
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// Set the wait duration between retry attempts
+    pub fn with_wait_duration(mut self, wait_duration: Duration) -> Self {
+        self.wait_duration = wait_duration;
+        self
+    }
+
+    /// Set initial parameters
+    pub fn with_params(mut self, params: Params) -> Self {
+        self.params = params;
+        self
+    }
+}
+
+impl Node for BaseNode {
+    fn get_params(&self) -> &Params {
+        &self.params
+    }
+
+    fn set_params(&mut self, params: Params) {
+        self.params = params;
+    }
+
+    fn add_successor(&mut self, action: Action, successor: NodeRef) {
+        if self.successors.contains_key(&action) {
+            warn!(
+                "Node '{}': Overwriting successor for action '{}'",
+                self.name, action
+            );
+        }
+        self.successors.insert(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<Action, NodeRef> {
+        &self.successors
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<Action, NodeRef> {
+        &mut self.successors
+    }
+
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.max_retries
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.wait_duration
+    }
+}
+
+impl SyncNode for BaseNode {}
+
+/// Create a NodeRef from a SyncNode implementation
+pub fn node<T: SyncNode + 'static>(node: T) -> NodeRef {
+    Arc::new(Mutex::new(node))
+}
+
+/// Helper function to chain nodes using the default action
+pub fn then(from: &NodeRef, to: NodeRef) -> NodeRef {
+    from.lock()
+        .unwrap()
+        .add_successor(Action::Default, to.clone());
+    to
+}
+
+/// Struct and helper for adding a conditional transition
+pub struct ConditionalTransition {
+    pub src: NodeRef,
+    pub action: Action,
+}
+
+impl ConditionalTransition {
+    /// Chain the transition to a target node
+    pub fn then(self, tgt: NodeRef) -> NodeRef {
+        self.src
+            .lock()
+            .unwrap()
+            .add_successor(self.action, tgt.clone());
+        tgt
+    }
+}
+
+/// Helper function to create a conditional transition
+pub fn when(node: &NodeRef, action: impl Into<String>) -> ConditionalTransition {
+    ConditionalTransition {
+        src: node.clone(),
+        action: Action::Named(action.into()),
+    }
+}
+
+/// A flow that orchestrates a sequence of nodes
+pub struct Flow {
+    pub base: BaseNode,
+    pub start: NodeRef,
+}
+
+impl Flow {
+    /// Create a new flow with a starting node
+    pub fn new(name: impl Into<String>, start: NodeRef) -> Self {
+        Flow {
+            base: BaseNode::new(name),
+            start,
+        }
+    }
+
+    /// Get the next node based on the action from the current node
+    pub fn get_next_node(
+        node_guard: &MutexGuard<dyn SyncNode>,
+        action: &Action,
+    ) -> Option<NodeRef> {
+        // First try the specific action
+        if let Some(next) = node_guard.get_successors().get(action) {
+            return Some(next.clone());
+        }
+
+        // Then try the default action
+        if action != &Action::Default {
+            if let Some(next) = node_guard.get_successors().get(&Action::Default) {
+                return Some(next.clone());
+            }
+        }
+
+        // No successor found
+        if !node_guard.get_successors().is_empty() {
+            warn!(
+                "Flow ends: action '{}' not found in node '{}'. Available actions: {:?}",
+                action,
+                node_guard.get_name(),
+                node_guard.get_successors().keys().collect::<Vec<_>>()
+            );
+        }
+
+        None
+    }
+
+    /// Orchestrate the flow execution
+    pub fn orchestrate(
+        &self,
+        shared: &mut Shared,
+        params_override: Option<Params>,
+    ) -> NodeResult<()> {
+        let p = params_override.unwrap_or_else(|| self.base.params.clone());
+        let mut curr = self.start.clone();
+
+        loop {
+            let action = {
+                let mut node = match curr.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        error!("Mutex was poisoned. Recovering and continuing.");
+                        poisoned.into_inner()
+                    }
+                };
+
+                node.set_params(p.clone());
+
+                match node._run(shared) {
+                    Ok(action) => {
+                        if action == Action::Terminate {
+                            debug!(
+                                "Flow '{}' terminated by node '{}'",
+                                self.base.name,
+                                node.get_name()
+                            );
+                            return Ok(());
+                        }
+
+                        if let Some(next_node) = Self::get_next_node(&node, &action) {
+                            // Release the lock before moving to the next node
+                            drop(node);
+                            curr = next_node;
+                            continue;
+                        } else {
+                            // No successor found, end the flow
+                            debug!(
+                                "Flow '{}' ended after node '{}'",
+                                self.base.name,
+                                node.get_name()
+                            );
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error in Flow '{}' execution: {}", self.base.name, e);
+                        return Err(NodeError::FlowError(format!("{}", e)));
+                    }
+                }
+            };
+        }
+    }
+}
+
+impl Node for Flow {
+    fn set_params(&mut self, params: Params) {
+        self.base.set_params(params);
+    }
+
+    fn get_params(&self) -> &Params {
+        self.base.get_params()
+    }
+
+    fn add_successor(&mut self, action: Action, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<Action, NodeRef> {
+        self.base.get_successors()
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<Action, NodeRef> {
+        self.base.get_successors_mut()
+    }
+
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.base.get_max_retries()
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.base.get_wait_duration()
+    }
+}
+
+impl SyncNode for Flow {
+    fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        self.base.prep(shared)
+    }
+
+    fn exec(&mut self, _prep_res: &Value) -> NodeResult<Value> {
+        Err(NodeError::ExecError(
+            "Flow doesn't support direct execution".to_string(),
+        ))
+    }
+
+    fn post(
+        &mut self,
+        shared: &mut Shared,
+        prep_res: &Value,
+        _exec_res: &Value,
+    ) -> NodeResult<Value> {
+        self.base.post(shared, prep_res, &Value::Null)
+    }
+
+    fn _run(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        let prep_res = self.prep(shared)?;
+        self.orchestrate(shared, None)?;
+        self.post(shared, &prep_res, &Value::Null)
+            .map(|v| Action::from(&v))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A test node that adds a value to shared state
+    struct AddToShared {
+        base: BaseNode,
+        key: String,
+        value: Value,
+    }
+
+    impl AddToShared {
+        fn new(name: impl Into<String>, key: impl Into<String>, value: Value) -> Self {
+            AddToShared {
+                base: BaseNode::new(name),
+                key: key.into(),
+                value,
+            }
+        }
+    }
+
+    impl Node for AddToShared {
+        fn get_params(&self) -> &Params {
+            self.base.get_params()
+        }
+
+        fn set_params(&mut self, params: Params) {
+            self.base.set_params(params);
+        }
+
+        fn add_successor(&mut self, action: Action, successor: NodeRef) {
+            self.base.add_successor(action, successor);
+        }
+
+        fn get_successors(&self) -> &HashMap<Action, NodeRef> {
+            self.base.get_successors()
+        }
+
+        fn get_successors_mut(&mut self) -> &mut HashMap<Action, NodeRef> {
+            self.base.get_successors_mut()
+        }
+
+        fn get_name(&self) -> &str {
+            self.base.get_name()
+        }
+
+        fn get_max_retries(&self) -> usize {
+            self.base.get_max_retries()
+        }
+
+        fn get_wait_duration(&self) -> Duration {
+            self.base.get_wait_duration()
+        }
+    }
+
+    impl SyncNode for AddToShared {
+        fn post(
+            &mut self,
+            shared: &mut Shared,
+            _prep_res: &Value,
+            _exec_res: &Value,
+        ) -> NodeResult<Value> {
+            shared.insert(self.key.clone(), self.value.clone());
+            Ok(Value::Null)
+        }
+    }
+
+    // A test node that returns a specific action
+    struct ActionNode {
+        base: BaseNode,
+        return_action: Action,
+    }
+
+    impl ActionNode {
+        fn new(name: impl Into<String>, return_action: Action) -> Self {
+            ActionNode {
+                base: BaseNode::new(name),
+                return_action,
+            }
+        }
+    }
+
+    impl Node for ActionNode {
+        fn get_params(&self) -> &Params {
+            self.base.get_params()
+        }
+
+        fn set_params(&mut self, params: Params) {
+            self.base.set_params(params);
+        }
+
+        fn add_successor(&mut self, action: Action, successor: NodeRef) {
+            self.base.add_successor(action, successor);
+        }
+
+        fn get_successors(&self) -> &HashMap<Action, NodeRef> {
+            self.base.get_successors()
+        }
+
+        fn get_successors_mut(&mut self) -> &mut HashMap<Action, NodeRef> {
+            self.base.get_successors_mut()
+        }
+
+        fn get_name(&self) -> &str {
+            self.base.get_name()
+        }
+
+        fn get_max_retries(&self) -> usize {
+            self.base.get_max_retries()
+        }
+
+        fn get_wait_duration(&self) -> Duration {
+            self.base.get_wait_duration()
+        }
+    }
+
+    impl SyncNode for ActionNode {
+        fn post(
+            &mut self,
+            _shared: &mut Shared,
+            _prep_res: &Value,
+            _exec_res: &Value,
+        ) -> NodeResult<Value> {
+            match &self.return_action {
+                Action::Default => Ok(Value::Null),
+                Action::Named(name) => Ok(Value::String(name.clone())),
+                Action::Terminate => Ok(Value::String("terminate".to_string())),
+            }
+        }
+    }
+
+    #[test]
+    fn test_basic_flow() {
+        let node1 = node(AddToShared::new(
+            "Node1",
+            "key1",
+            Value::String("value1".to_string()),
+        ));
+        let node2 = node(AddToShared::new(
+            "Node2",
+            "key2",
+            Value::String("value2".to_string()),
+        ));
+        let node3 = node(AddToShared::new(
+            "Node3",
+            "key3",
+            Value::String("value3".to_string()),
+        ));
+
+        then(&node1, node2.clone());
+        then(&node2, node3.clone());
+
+        let flow = Flow::new("TestFlow", node1);
+        let mut shared = HashMap::new();
+
+        let result = flow.orchestrate(&mut shared, None);
+        assert!(result.is_ok());
+
+        assert_eq!(shared.len(), 3);
+        assert_eq!(
+            shared.get("key1").unwrap(),
+            &Value::String("value1".to_string())
+        );
+        assert_eq!(
+            shared.get("key2").unwrap(),
+            &Value::String("value2".to_string())
+        );
+        assert_eq!(
+            shared.get("key3").unwrap(),
+            &Value::String("value3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_branching_flow() {
+        let start = node(ActionNode::new(
+            "Start",
+            Action::Named("branch1".to_string()),
+        ));
+        let branch1 = node(AddToShared::new(
+            "Branch1",
+            "path",
+            Value::String("branch1".to_string()),
+        ));
+        let branch2 = node(AddToShared::new(
+            "Branch2",
+            "path",
+            Value::String("branch2".to_string()),
+        ));
+
+        when(&start, "branch1").then(branch1.clone());
+        when(&start, "branch2").then(branch2.clone());
+
+        let flow = Flow::new("BranchingFlow", start);
+        let mut shared = HashMap::new();
+
+        let result = flow.orchestrate(&mut shared, None);
+        assert!(result.is_ok());
+
+        assert_eq!(shared.len(), 1);
+        assert_eq!(
+            shared.get("path").unwrap(),
+            &Value::String("branch1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_termination() {
+        let node1 = node(AddToShared::new(
+            "Node1",
+            "key1",
+            Value::String("value1".to_string()),
+        ));
+        let node2 = node(ActionNode::new("Node2", Action::Terminate));
+        let node3 = node(AddToShared::new(
+            "Node3",
+            "key3",
+            Value::String("value3".to_string()),
+        ));
+
+        then(&node1, node2.clone());
+        then(&node2, node3.clone());
+
+        let flow = Flow::new("TerminationFlow", node1);
+        let mut shared = HashMap::new();
+
+        let result = flow.orchestrate(&mut shared, None);
+        assert!(result.is_ok());
+
+        assert_eq!(shared.len(), 1);
+        assert_eq!(
+            shared.get("key1").unwrap(),
+            &Value::String("value1".to_string())
+        );
+        assert!(!shared.contains_key("key3"));
+    }
+}
