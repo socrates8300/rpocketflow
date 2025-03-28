@@ -160,12 +160,12 @@ impl AsyncNode for McpNode {
         }
         
         // Get the system prompt (use empty string if none provided)
-        let system = self.config.system_prompt.clone().unwrap_or_else(|| "".to_string());
+        let system = self.config.system_prompt.clone().unwrap_or_default();
         
         // Create the request with all required fields
         let request = MessagesRequest {
             messages: api_messages,
-            system: system,
+            system,
             model: self.config.model.clone(),
             max_tokens: self.config.max_tokens.map(|t| t as usize).unwrap_or(1024),
             stop_sequences: Vec::new(),
@@ -191,7 +191,7 @@ impl AsyncNode for McpNode {
             },
             Err(e) => {
                 error!("Error from MCP API: {}", e);
-                Err(format!("MCP API error: {}", e))
+                Err(crate::errors::FlowError::Anthropic(format!("MCP API error: {}", e)))
             }
         }
     }

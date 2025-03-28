@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::sync_node::SyncNode;
+use crate::errors::FlowResult;
 
 /// Type alias for node parameters
 pub type Params = HashMap<String, Value>;
@@ -14,4 +15,4 @@ pub type Shared = HashMap<String, Value>;
 pub type NodeRef = Arc<Mutex<dyn SyncNode + Send>>;
 
 /// Type alias for results from node operations
-pub type NodeResult<T> = Result<T, String>;
+pub type NodeResult<T> = FlowResult<T>;

@@ -354,18 +354,20 @@ macro_rules! processing_chain {
 ///
 /// # Examples
 ///
-/// ```rust
-/// use rpocketflow::mcp_protocol_node_macro;
-/// use serde_json::json;
-///
-/// // Create an MCP client that launches a specific server command
-/// let mcp_node = mcp_protocol_node_macro! {
-///     name: "MCP Client",
-///     server_command: "/path/to/mcp_server",
-///     server_args: ["--config", "config.json"],
-///     client_name: "My Client",
-///     client_version: "1.0.0"
-/// };
+/// ```
+/// // This is a pseudo-code example. In real code, the macro would be used like this:
+/// //
+/// // use rpocketflow::mcp_protocol_node_macro;
+/// // use serde_json::json;
+/// //
+/// // // Create an MCP client that launches a specific server command
+/// // let mcp_node = mcp_protocol_node_macro! {
+/// //     name: "MCP Client",
+/// //     server_command: "/path/to/mcp_server",
+/// //     server_args: ["--config", "config.json"],
+/// //     client_name: "My Client",
+/// //     client_version: "1.0.0"
+/// // };
 /// ```
 #[macro_export]
 macro_rules! mcp_protocol_node_macro {
@@ -379,8 +381,8 @@ macro_rules! mcp_protocol_node_macro {
     ) => {{
         // First, create the configuration
         let mut config = $crate::MCPClientConfig::new(
-            $($client_name)? .unwrap_or_else(|| "RPocketFlow Client"),
-            $($client_version)? .unwrap_or_else(|| env!("CARGO_PKG_VERSION"))
+            $($client_name)?.unwrap_or_else(|| "RPocketFlow Client"),
+            $($client_version)?.unwrap_or_else(|| env!("CARGO_PKG_VERSION"))
         );
         
         // Add server command and args

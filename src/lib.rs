@@ -1,4 +1,5 @@
 pub mod async_node;
+pub mod errors;
 pub mod macros;
 pub mod macros_tests;
 pub mod sync;
@@ -6,6 +7,7 @@ pub mod mcp;
 
 // Re-export common types for convenience
 pub use async_node::{AsyncFlow, AsyncNode, AsyncNodeImpl};
+pub use errors::{FlowError, FlowResult};
 pub use sync::{
     node, then, when, Action, BaseNode, ConditionalTransition, Flow, Node, NodeRef, NodeResult,
     Params, Shared, SyncNode,

@@ -28,7 +28,7 @@ pub trait SyncNode: Node {
     }
 
     /// Fallback execution when retries are exhausted
-    fn exec_fallback(&mut self, _prep_res: &Value, err: String) -> NodeResult<Value> {
+    fn exec_fallback(&mut self, _prep_res: &Value, err: crate::errors::FlowError) -> NodeResult<Value> {
         Err(err)
     }
 
@@ -62,7 +62,7 @@ pub trait SyncNode: Node {
         }
 
         // All retries failed, call fallback
-        let err = last_error.unwrap_or_else(|| "Unknown error".to_string());
+        let err = last_error.unwrap_or_else(|| crate::errors::FlowError::NodeExecution("Unknown error".to_string()));
         self.exec_fallback(prep_res, err)
     }
 

@@ -26,7 +26,7 @@ pub trait AsyncNode: Node {
         Ok(Value::Null)
     }
 
-    async fn exec_fallback_async(&mut self, prep_res: &Value, err: String) -> NodeResult<Value> {
+    async fn exec_fallback_async(&mut self, prep_res: &Value, err: crate::errors::FlowError) -> NodeResult<Value> {
         Err(err)
     }
 
@@ -48,7 +48,11 @@ pub trait AsyncNode: Node {
                 }
             }
         }
-        unreachable!()
+        
+        // This should never be reached if max_retries >= 1, but just in case:
+        Err(crate::errors::FlowError::NodeExecution(
+            format!("Maximum retries ({}) exceeded in node execution", max_retries)
+        ))
     }
 
     async fn _run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
@@ -221,7 +225,7 @@ impl AsyncFlow {
                     }
                     Err(e) => {
                         println!("Error in Flow '{}' execution: {}", self.base.get_name(), e);
-                        return Err(format!("Flow error: {}", e));
+                        return Err(crate::errors::FlowError::FlowOrchestration(format!("Flow error: {}", e)));
                     }
                 }
             };
@@ -270,7 +274,7 @@ impl AsyncNode for AsyncFlow {
     }
 
     async fn exec_async(&mut self, _prep_res: &Value) -> NodeResult<Value> {
-        Err("AsyncFlow doesn't support direct execution".to_string())
+        Err(crate::errors::FlowError::NodeExecution("AsyncFlow doesn't support direct execution".to_string()))
     }
 
     async fn post_async(

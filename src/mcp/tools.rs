@@ -89,11 +89,11 @@ impl ToolRegistry {
             tools: HashMap::new(),
         }
     }
-
+    
     pub fn register(&mut self, tool: Tool) {
         self.tools.insert(tool.name.clone(), tool);
     }
-
+    
     pub fn get(&self, name: &str) -> Option<&Tool> {
         self.tools.get(name)
     }
@@ -111,7 +111,7 @@ impl ToolRegistry {
     /// Process tool calls from a model response
     pub fn process_tool_call(&self, name: &str, args: Value) -> Value {
         // Try to execute the function
-        let result = match self.get(name) {
+        let result = match self.tools.get(name) {
             Some(tool) => tool.execute(args.clone()),
             None => Err(format!("Tool not found: {}", name)),
         };
@@ -124,6 +124,12 @@ impl ToolRegistry {
             },
             Err(e) => json!({"error": e}),
         }
+    }
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

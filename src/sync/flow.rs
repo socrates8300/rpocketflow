@@ -104,7 +104,7 @@ impl Flow {
                     }
                     Err(e) => {
                         println!("Error in Flow '{}' execution: {}", self.base.name, e);
-                        return Err(format!("Flow error: {}", e));
+                        return Err(crate::errors::FlowError::FlowOrchestration(format!("Flow error: {}", e)));
                     }
                 }
             };
@@ -152,7 +152,7 @@ impl SyncNode for Flow {
     }
 
     fn exec(&mut self, _prep_res: &Value) -> NodeResult<Value> {
-        Err("Flow doesn't support direct execution".to_string())
+        Err(crate::errors::FlowError::NodeExecution("Flow doesn't support direct execution".to_string()))
     }
 
     fn post(

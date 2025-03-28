@@ -10,7 +10,13 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use crate::async_node::AsyncNode;
+use crate::errors::{FlowError, FlowResult};
 use crate::sync::{BaseNode, Node, NodeRef, NodeResult, Params, Shared, SyncNode};
+
+// Helper function to create server connection errors
+fn server_conn_error(msg: &str) -> FlowError {
+    FlowError::MCPServer(msg.to_string())
+}
 
 /// Configuration for an MCP client node
 #[derive(Clone)]
@@ -62,8 +68,8 @@ impl MCPClientConfig {
     }
 }
 
-/// Type representing an MCP client error
-pub type MCPClientResult<T> = Result<T, String>;
+/// Type representing an MCP client result
+pub type MCPClientResult<T> = crate::errors::FlowResult<T>;
 
 /// A struct to handle communication with the MCP server process
 struct MCPConnection {
@@ -74,7 +80,9 @@ struct MCPConnection {
 // The struct is not Clone, but we'll provide methods to share it safely
 impl MCPConnection {
     /// Create a new MCPConnection with the given server command and arguments
-    async fn new(command: &str, args: &[String]) -> Result<(Self, Child), String> {
+    async fn new(command: &str, args: &[String]) -> crate::errors::FlowResult<(Self, Child)> {
+        use crate::errors::FlowError;
+        
         // Start the server process
         let mut child = Command::new(command)
             .args(args)
@@ -82,17 +90,17 @@ impl MCPConnection {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| format!("Failed to start MCP server process: {}", e))?;
+            .map_err(|e| FlowError::MCPServer(format!("Failed to start MCP server process: {}", e)))?;
 
         // Get stdin and stdout
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| "Failed to open stdin".to_string())?;
+            .ok_or_else(|| FlowError::MCPServer("Failed to open stdin".to_string()))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| "Failed to open stdout".to_string())?;
+            .ok_or_else(|| FlowError::MCPServer("Failed to open stdout".to_string()))?;
 
         // Create channels for communication
         let (stdin_tx, mut stdin_rx) = mpsc::channel(10);
@@ -199,7 +207,7 @@ impl MCPProtocolNode {
 
             info!("Started MCP server process");
         } else {
-            return Err("No server command specified".to_string());
+            return Err(crate::errors::FlowError::MCPServer("No server command specified".to_string()));
         }
 
         // Prepare initialization message
@@ -219,14 +227,14 @@ impl MCPProtocolNode {
         if let Some(conn) = &self.connection {
             conn.send(&init_request).await?;
         } else {
-            return Err("No connection to MCP server".to_string());
+            return Err(crate::errors::FlowError::MCPServer("No connection to MCP server".to_string()));
         }
 
         // Receive the response
         let response: Value = if let Some(conn) = &mut self.connection {
             conn.receive().await?
         } else {
-            return Err("No connection to MCP server".to_string());
+            return Err(server_conn_error("No connection to MCP server"));
         };
 
         // Extract and parse the result
@@ -251,9 +259,9 @@ impl MCPProtocolNode {
 
             Ok(result.clone())
         } else if let Some(error) = response.get("error") {
-            Err(format!("Initialization error: {}", error))
+            Err(FlowError::Protocol(format!("Initialization error: {}", error)))
         } else {
-            Err("Invalid response format".to_string())
+            Err(FlowError::Protocol("Invalid response format".to_string()))
         }
     }
 
@@ -305,24 +313,24 @@ impl MCPProtocolNode {
         if let Some(conn) = &self.connection {
             conn.send(&request).await?;
         } else {
-            return Err("No connection to MCP server".to_string());
+            return Err(crate::errors::FlowError::MCPServer("No connection to MCP server".to_string()));
         }
 
         // Receive the response
         let response: Value = if let Some(conn) = &mut self.connection {
             conn.receive().await?
         } else {
-            return Err("No connection to MCP server".to_string());
+            return Err(server_conn_error("No connection to MCP server"));
         };
 
         // Extract and parse the result
         if let Some(result) = response.get("result") {
             serde_json::from_value(result.clone())
-                .map_err(|e| format!("Failed to parse result: {}", e))
+                .map_err(|e| FlowError::Protocol(format!("Failed to parse result: {}", e)))
         } else if let Some(error) = response.get("error") {
-            Err(format!("Tool call error: {}", error))
+            Err(FlowError::Protocol(format!("Tool call error: {}", error)))
         } else {
-            Err("Invalid response format".to_string())
+            Err(FlowError::Protocol("Invalid response format".to_string()))
         }
     }
 
@@ -446,7 +454,7 @@ impl AsyncNode for MCPProtocolNode {
                     shared.insert("mcp_init_result".to_string(), init_result);
                 }
                 Err(e) => {
-                    return Err(format!("Failed to initialize MCP client: {}", e));
+                    return Err(crate::errors::FlowError::MCPClient(format!("Failed to initialize MCP client: {}", e)));
                 }
             }
         }
