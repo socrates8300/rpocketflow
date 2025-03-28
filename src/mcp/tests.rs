@@ -8,8 +8,8 @@ mod mcp_node_tests {
     use std::collections::HashMap;
     use std::env;
 
-    #[test]
-    fn test_mcp_node_creation() {
+    #[tokio::test]
+    async fn test_mcp_node_creation() {
         let config = McpConfig::new("test_key", Models::CLAUDE_3_HAIKU)
             .with_system_prompt("Test prompt")
             .with_max_tokens(100)
@@ -18,7 +18,7 @@ mod mcp_node_tests {
         let node = mcp_node("TestNode", config);
 
         // Verify the node was created with the correct name
-        let node_ref = node.lock().unwrap();
+        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
         assert_eq!(node_ref.get_name(), "TestNode");
     }
 }
@@ -30,13 +30,13 @@ mod protocol_tests {
     use serde_json::json;
     use std::collections::HashMap;
 
-    #[test]
-    fn test_mcp_protocol_node_creation() {
+    #[tokio::test]
+    async fn test_mcp_protocol_node_creation() {
         let config = MCPClientConfig::new("TestClient", "1.0.0");
         let node = mcp_protocol_node("TestProtocolNode", config);
 
         // Verify the node was created with the correct name
-        let node_ref = node.lock().unwrap();
+        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
         assert_eq!(node_ref.get_name(), "TestProtocolNode");
     }
 }

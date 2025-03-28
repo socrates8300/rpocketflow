@@ -6,12 +6,14 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc; // Keep Arc for AsyncNodeRef creation
 use tokio::sync::mpsc;
 
 use crate::async_node::AsyncNode;
+use crate::async_node::EMPTY_ASYNC_SUCCESSORS; // Import static empty map
 use crate::errors::{FlowError, FlowResult};
 use crate::sync::{BaseNode, Node, NodeRef, NodeResult, Params, Shared, SyncNode};
+use crate::sync::types::AsyncNodeRef; // Import AsyncNodeRef type
 
 // Helper function to create server connection errors
 fn server_conn_error(msg: &str) -> FlowError {
@@ -510,12 +512,30 @@ impl AsyncNode for MCPProtocolNode {
             Ok(json!("error"))
         }
     }
+    
+    // Add required async successor methods
+    fn add_async_successor(&mut self, _action: String, _successor: AsyncNodeRef) {
+        // Since MCPProtocolNode doesn't store async successors directly, log a warning
+        log::warn!("MCPProtocolNode '{}' does not support direct async successors; use wrapping structure like AsyncFlow.", self.get_name());
+    }
+
+    fn get_async_successors(&self) -> &HashMap<String, AsyncNodeRef> {
+        // Use the static empty map from once_cell
+        &EMPTY_ASYNC_SUCCESSORS
+    }
+
+    fn get_async_successors_mut(&mut self) -> &mut HashMap<String, AsyncNodeRef> {
+        // This should never be called since we don't store async successors
+        log::warn!("MCPProtocolNode does not support direct mutable access to async successors.");
+        unimplemented!("MCPProtocolNode does not directly manage mutable async successors");
+    }
 }
 
 /// Create a new MCP Protocol node
-pub fn mcp_protocol_node(name: impl Into<String>, config: MCPClientConfig) -> NodeRef {
+pub fn mcp_protocol_node(name: impl Into<String>, config: MCPClientConfig) -> AsyncNodeRef { // Return type is AsyncNodeRef
     let node = MCPProtocolNode::new(name, config);
-    Arc::new(Mutex::new(node))
+    // Use the async_node helper
+    crate::async_node::async_node(node)
 }
 
 /// Helper function to create an MCP client config for a stdio-based MCP server

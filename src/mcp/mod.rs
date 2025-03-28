@@ -3,11 +3,13 @@ use anthropic::types::{Message, MessagesRequest, Role, ContentBlock};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+// All imports are needed
 use log::{debug, error};
 
 use crate::async_node::AsyncNode;
+use crate::async_node::EMPTY_ASYNC_SUCCESSORS; // Import static empty map
 use crate::sync::{Node, NodeRef, NodeResult, Params, Shared, BaseNode, SyncNode};
+use crate::sync::types::AsyncNodeRef; // Import AsyncNodeRef type
 
 pub mod models;
 pub mod tools;
@@ -253,10 +255,29 @@ impl AsyncNode for McpNode {
         
         Ok(json!("default"))
     }
+    
+    // Add required async successor methods
+    fn add_async_successor(&mut self, _action: String, _successor: AsyncNodeRef) {
+        // Since McpNode doesn't store async successors directly, log a warning
+        log::warn!("McpNode '{}' does not support direct async successors; use wrapping structure like AsyncFlow.", self.get_name());
+    }
+
+    fn get_async_successors(&self) -> &HashMap<String, AsyncNodeRef> {
+        // Use the static empty map from once_cell
+        &EMPTY_ASYNC_SUCCESSORS
+    }
+
+    fn get_async_successors_mut(&mut self) -> &mut HashMap<String, AsyncNodeRef> {
+        // This should never be called since we don't store async successors
+        log::warn!("McpNode does not support direct mutable access to async successors.");
+        unimplemented!("McpNode does not directly manage mutable async successors");
+    }
 }
 
+
 /// Create a new MCP node
-pub fn mcp_node(name: impl Into<String>, config: McpConfig) -> NodeRef {
+pub fn mcp_node(name: impl Into<String>, config: McpConfig) -> AsyncNodeRef { // Return type is AsyncNodeRef
     let node = McpNode::new(name, config);
-    Arc::new(Mutex::new(node))
+    // Use the async_node helper which now uses TokioMutex
+    crate::async_node::async_node(node)
 }
