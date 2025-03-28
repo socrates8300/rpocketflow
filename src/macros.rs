@@ -3,6 +3,9 @@
 /// # Examples
 ///
 /// ```rust
+/// use rpocketflow::node_impl;
+/// use serde_json::Value;
+///
 /// // Create a simple node
 /// let my_node = node_impl! {
 ///     name: "MyNode",
@@ -86,11 +89,32 @@ macro_rules! node_impl {
 /// # Examples
 ///
 /// ```rust
+/// use rpocketflow::flow;
+/// use rpocketflow::node_impl;
+/// use serde_json::Value;
+/// 
+/// // First, create some nodes to use in our flow
+/// let node1 = node_impl! { name: "Node1", exec: |_: &Value| Ok(Value::Null) };
+/// let node2 = node_impl! { name: "Node2", exec: |_: &Value| Ok(Value::Null) };
+/// let node3 = node_impl! { name: "Node3", exec: |_: &Value| Ok(Value::Null) };
+///
 /// // Create a linear flow
 /// let flow = flow! {
 ///     name: "SimpleFlow",
 ///     nodes: [node1, node2, node3]
 /// };
+/// ```
+///
+/// ```rust
+/// use rpocketflow::flow;
+/// use rpocketflow::node_impl;
+/// use serde_json::Value;
+/// 
+/// // First, create some nodes
+/// let start_node = node_impl! { name: "Start", exec: |_: &Value| Ok(Value::Null) };
+/// let path1_node = node_impl! { name: "Path1", exec: |_: &Value| Ok(Value::Null) };
+/// let path2_node = node_impl! { name: "Path2", exec: |_: &Value| Ok(Value::Null) };
+/// let end_node = node_impl! { name: "End", exec: |_: &Value| Ok(Value::Null) };
 ///
 /// // Create a more complex flow with branches
 /// let flow = flow! {
@@ -143,10 +167,15 @@ macro_rules! flow {
 /// # Examples
 ///
 /// ```rust
+/// use rpocketflow::decision_node;
+/// use rpocketflow::{Params, Shared};
+/// use serde_json::Value;
+/// use std::collections::HashMap;
+///
 /// // Create a decision node based on a condition
 /// let decision_node = decision_node! {
 ///     name: "RouteDecision",
-///     condition: |params, shared| {
+///     condition: |params: &Params, shared: &Shared| {
 ///         if let Some(Value::Number(age)) = shared.get("age") {
 ///             if age.as_u64().unwrap_or(0) >= 18 {
 ///                 "adult".to_string()
@@ -226,13 +255,17 @@ macro_rules! decision_node {
 /// # Examples
 ///
 /// ```rust
+/// use rpocketflow::processing_chain;
+/// use rpocketflow::NodeResult;
+/// use serde_json::Value;
+/// 
 /// // Create a chain of processing steps
 /// let processor = processing_chain! {
 ///     name: "DataProcessor",
 ///     steps: [
-///         |data: &Value| { /* transformation 1 */ Ok(data.clone()) },
-///         |data: &Value| { /* transformation 2 */ Ok(data.clone()) },
-///         |data: &Value| { /* transformation 3 */ Ok(data.clone()) }
+///         |data: &Value| -> NodeResult<Value> { /* transformation 1 */ Ok(data.clone()) },
+///         |data: &Value| -> NodeResult<Value> { /* transformation 2 */ Ok(data.clone()) },
+///         |data: &Value| -> NodeResult<Value> { /* transformation 3 */ Ok(data.clone()) }
 ///     ]
 /// };
 /// ```

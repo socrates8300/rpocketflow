@@ -4,11 +4,18 @@ A lightweight, flexible workflow orchestration library for Rust that simplifies 
 
 #### Overview
 
-RPocketFlow supports both synchronous and asynchronous execution models, enabling you to build modular workflows with interconnected nodes. Whether you’re implementing linear pipelines, branching paths, or complex state machines, RPocketFlow provides a robust framework that emphasizes clarity, minimal boilerplate, and efficient error handling.
+RPocketFlow supports both synchronous and asynchronous execution models, enabling you to build modular workflows with interconnected nodes. Whether you're implementing linear pipelines, branching paths, or complex state machines, RPocketFlow provides a robust framework that emphasizes clarity, minimal boilerplate, and efficient error handling.
 
 #### Features
 
 RPocketFlow offers a modular node-based architecture, making it easy to build and reuse workflow components. It supports both synchronous and asynchronous operations (using Tokio), intuitive flow control with branching and retry mechanisms, and shared state management for data passing between nodes. The builder-pattern API further minimizes boilerplate and helps you focus on your business logic, all while keeping dependencies to a minimum.
+
+Additionally, RPocketFlow includes integration with Anthropic's Model Context Protocol (MCP), making it easy to build AI-powered workflows using Claude models. The MCP integration supports:
+
+- Text-based conversations with Claude
+- Tool usage and function calling
+- Conversation history management
+- Seamless integration with RPocketFlow's node-based architecture
 
 #### Installation
 
@@ -26,6 +33,14 @@ Also ensure you have the required dependencies for extended features:
 serde_json = "1.0"
 tokio = { version = "1.0", features = ["full"] }  # Required for async features
 async-trait = "0.1"  # Required for asynchronous trait support
+```
+
+For MCP integration with Claude, add these dependencies:
+
+```toml
+[dependencies]
+anthropic = "0.0.8"  # Official Anthropic API client
+serde = { version = "1.0", features = ["derive"] }
 ```
 
 #### Quick Start
@@ -160,6 +175,116 @@ async fn main() {
 }
 ```
 
+#### MCP Integration: Using Claude AI in Workflows
+
+RPocketFlow makes it easy to incorporate Claude AI models into your workflows using the MCP (Model Context Protocol) integration. Here's how to create a simple conversational agent:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use std::collections::HashMap;
+use std::env;
+
+fn main() {
+    // Get Anthropic API key from environment
+    let api_key = env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
+    
+    // Create a config for Claude
+    let mcp_config = McpConfig::new(api_key, Models::CLAUDE_3_HAIKU)
+        .with_system_prompt("You are a helpful assistant specialized in Rust programming.")
+        .with_max_tokens(1000)
+        .with_temperature(0.7);
+    
+    // Create an MCP node to interact with Claude
+    let mcp_node = mcp_node("ClaudeNode", mcp_config);
+    
+    // Create a simple input and output node
+    let input_node = node_impl! {
+        name: "UserInput",
+        exec: |_| {
+            Ok(json!("What are the advantages of using Rust over C++?"))
+        },
+        post: |shared, _, exec_res| {
+            shared.insert("mcp_input".to_string(), exec_res.clone());
+            Ok(json!("default"))
+        }
+    };
+    
+    let output_node = node_impl! {
+        name: "ResponseOutput",
+        exec: |_| Ok(json!(null)),
+        post: |shared, _, _| {
+            if let Some(output) = shared.get("mcp_output") {
+                println!("Claude's response:\n{}", output);
+            }
+            Ok(json!("terminate"))
+        }
+    };
+    
+    // Connect the nodes in a flow
+    let flow = flow! {
+        name: "ClaudeQAFlow",
+        start: input_node.clone(),
+        connections: [
+            (input_node.clone(), "default", mcp_node.clone()),
+            (mcp_node.clone(), "default", output_node.clone())
+        ]
+    };
+    
+    // Run the flow
+    let mut shared = HashMap::new();
+    match flow.orchestrate(&mut shared, None) {
+        Ok(_) => println!("Flow completed successfully"),
+        Err(e) => println!("Flow failed: {}", e),
+    }
+}
+```
+
+##### Using Tool Calling with Claude
+
+You can enhance Claude's capabilities by providing tools that it can call:
+
+```rust
+use rpocketflow::*;
+use rpocketflow::mcp::tools::{Tool, ToolRegistry, string_param};
+use serde_json::json;
+use std::collections::HashMap;
+
+// Create a tool registry
+let mut registry = ToolRegistry::new();
+
+// Create a weather tool
+let weather_tool = Tool::new(
+    "get_weather",
+    "Get the current weather for a location",
+    json!({
+        "type": "object",
+        "properties": {
+            "location": string_param("The city and state, e.g. San Francisco, CA")
+        },
+        "required": ["location"]
+    })
+).with_handler(|args| {
+    let location = args.get("location")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    
+    // In a real implementation, you would call a weather API here
+    Ok(json!({
+        "temperature": 72,
+        "condition": "sunny",
+        "location": location
+    }))
+});
+
+// Register the tool
+registry.register(weather_tool);
+
+// Now you can provide this tool registry to Claude
+// (See the full example in examples/mcp_example.rs)
+```
+
 #### Macros for Simplified Usage
 
 RPocketFlow includes several macros that help reduce boilerplate and streamline common tasks when defining nodes and flows.
@@ -250,62 +375,6 @@ let async_flow = async_flow! {
 };
 ```
 
-##### Specialized Node Macros
-
-*Creating Decision Nodes with `decision_node!`:*
-
-```rust
-// Create a decision node based on shared state values
-let router = decision_node! {
-    name: "Router",
-    condition: |params, shared| {
-        if let Some(Value::Number(score)) = shared.get("score") {
-            if score.as_f64().unwrap_or(0.0) > 0.8 {
-                "high_priority"
-            } else if score.as_f64().unwrap_or(0.0) > 0.5 {
-                "medium_priority"
-            } else {
-                "low_priority"
-            }
-        } else {
-            "unknown"
-        }
-    }
-};
-```
-
-*Creating Processing Pipelines with `processing_chain!`:*
-
-```rust
-// Create a multi-step processing pipeline
-let pipeline = processing_chain! {
-    name: "Pipeline",
-    steps: [
-        |data| {
-            // Step 1: Validate the data format
-            if data.is_object() {
-                Ok(data.clone())
-            } else {
-                Err("Invalid data format".to_string())
-            }
-        },
-        |data| {
-            // Step 2: Transform the data
-            let mut result = data.clone();
-            // ... transformation logic
-            Ok(result)
-        },
-        |data| {
-            // Step 3: Normalize the data
-            let mut result = data.clone();
-            // ... normalization logic
-            Ok(result)
-        }
-    ],
-    max_retries: 2
-};
-```
-
 #### Core Concepts
 
 At its core, RPocketFlow is built around the following ideas:
@@ -354,14 +423,17 @@ impl Node for CustomNode {
 impl SyncNode for CustomNode {
     fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
         // Custom preparation logic
+        Ok(Value::Null)
     }
     
     fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
         // Custom execution logic
+        Ok(Value::Null)
     }
     
     fn post(&mut self, shared: &mut Shared, prep_res: &Value, exec_res: &Value) -> NodeResult<Value> {
         // Custom post-processing logic
+        Ok(Value::Null)
     }
 }
 ```
@@ -375,18 +447,6 @@ RPocketFlow is structured around key components:
 • **Node Traits:** The `Node` trait is extended by `SyncNode` for synchronous operations and `AsyncNode` for asynchronous tasks, with `BaseNode` providing a default implementation.  
 • **Workflow Orchestration:** `Flow` and `AsyncFlow` manage the execution order, shared state, and error recovery across nodes.
 
-
-Based on the fixes we made during testing, it would be good to update a few parts of the README.md to reflect the lessons learned and ensure users follow best practices. Here are the key points that should be updated:
-
-1. **Arc<Mutex<>> and Cloning**: Add a note about the need to clone nodes when using them multiple times in flow connections.
-
-2. **JSON Number Handling**: Add a tip about comparing JSON number values in a type-flexible way.
-
-3. **Update Macro Examples**: Ensure all examples in the README include proper type annotations.
-
-Here are the specific sections I would add to the README:
-
-```markdown
 ### Important Usage Notes
 
 #### Cloning Nodes in Flow Connections
@@ -435,7 +495,6 @@ let node = node_impl! {
     }
 };
 ```
-```
 
 #### License
 
@@ -452,4 +511,3 @@ Contributions are welcome! To contribute:
 5. Open a Pull Request.
 
 Your contributions and feedback are greatly appreciated!
-
