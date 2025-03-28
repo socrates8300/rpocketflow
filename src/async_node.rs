@@ -13,7 +13,7 @@ pub trait AsyncNode: Node {
     }
 
     async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-        println!("AsyncNode exec_async called with prep_res: {}", prep_res);
+        log::debug!("AsyncNode exec_async called with prep_res: {}", prep_res);
         Ok(Value::Null)
     }
 
@@ -64,7 +64,7 @@ pub trait AsyncNode: Node {
 
     async fn run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
         if !self.get_successors().is_empty() {
-            println!("Warning: Node won't run successors. Use AsyncFlow.");
+            log::warn!("Warning: Node won't run successors. Use AsyncFlow.");
         }
         self._run_async(shared).await
     }
@@ -134,7 +134,7 @@ impl AsyncNode for AsyncNodeImpl {
     }
 
     async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-        println!(
+        log::debug!(
             "AsyncNodeImpl exec_async called with prep_res: {}",
             prep_res
         );
@@ -178,7 +178,7 @@ impl AsyncFlow {
                 let mut node = match curr.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
-                        println!("Mutex was poisoned. Recovering and continuing.");
+                        log::warn!("Mutex was poisoned. Recovering and continuing.");
                         poisoned.into_inner()
                     }
                 };
@@ -188,7 +188,7 @@ impl AsyncFlow {
                 match node._run(shared) {
                     Ok(action) => {
                         if action == Action::Terminate {
-                            println!(
+                            log::info!(
                                 "Flow '{}' terminated by node '{}'",
                                 self.base.get_name(),
                                 node.get_name()
@@ -219,12 +219,12 @@ impl AsyncFlow {
                             continue;
                         } else {
                             // No successor found, end the flow
-                            println!("Flow '{}' ended naturally", self.base.get_name());
+                            log::info!("Flow '{}' ended naturally", self.base.get_name());
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("Error in Flow '{}' execution: {}", self.base.get_name(), e);
+                        log::error!("Error in Flow '{}' execution: {}", self.base.get_name(), e);
                         return Err(crate::errors::FlowError::FlowOrchestration(format!("Flow error: {}", e)));
                     }
                 }

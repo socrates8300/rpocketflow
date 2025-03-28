@@ -61,8 +61,8 @@ impl Node for BaseNode {
 
     fn add_successor(&mut self, action: String, successor: NodeRef) {
         if self.successors.contains_key(&action) {
-            println!(
-                "Warning: Node '{}': Overwriting successor for action '{}'",
+            log::warn!(
+                "Node '{}': Overwriting successor for action '{}'",
                 self.name, action
             );
         }

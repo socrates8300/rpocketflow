@@ -5,12 +5,13 @@
 /// ```rust
 /// use rpocketflow::node_impl;
 /// use serde_json::Value;
+/// use log::info;
 ///
 /// // Create a simple node
 /// let my_node = node_impl! {
 ///     name: "MyNode",
 ///     exec: |_prep_res: &Value| {
-///         println!("Node is executing!");
+///         info!("Node is executing!");
 ///         Ok(Value::Null)
 ///     }
 /// };

@@ -47,7 +47,7 @@ pub trait SyncNode: Node {
                     if attempt + 1 < max_retries {
                         let wait = self.get_wait_duration();
                         if wait > std::time::Duration::from_secs(0) {
-                            println!(
+                            log::warn!(
                                 "Node '{}' execution failed, retrying in {:?} (attempt {}/{})",
                                 self.get_name(),
                                 wait,

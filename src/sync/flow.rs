@@ -44,7 +44,7 @@ impl Flow {
 
         // No successor found
         if !node_guard.get_successors().is_empty() {
-            println!(
+            log::warn!(
                 "Flow ends: action '{}' not found in node '{}'. Available actions: {:?}",
                 action,
                 node_guard.get_name(),
@@ -69,7 +69,7 @@ impl Flow {
                 let mut node = match curr.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
-                        println!("Mutex was poisoned. Recovering and continuing.");
+                        log::warn!("Mutex was poisoned. Recovering and continuing.");
                         poisoned.into_inner()
                     }
                 };
@@ -79,7 +79,7 @@ impl Flow {
                 match node._run(shared) {
                     Ok(action) => {
                         if action == Action::Terminate {
-                            println!(
+                            log::info!(
                                 "Flow '{}' terminated by node '{}'",
                                 self.base.name,
                                 node.get_name()
@@ -98,12 +98,12 @@ impl Flow {
                             continue;
                         } else {
                             // No successor found, end the flow
-                            println!("Flow '{}' ended naturally", self.base.name);
+                            log::info!("Flow '{}' ended naturally", self.base.name);
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("Error in Flow '{}' execution: {}", self.base.name, e);
+                        log::error!("Error in Flow '{}' execution: {}", self.base.name, e);
                         return Err(crate::errors::FlowError::FlowOrchestration(format!("Flow error: {}", e)));
                     }
                 }
