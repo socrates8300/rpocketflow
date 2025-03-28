@@ -18,3 +18,6 @@ pub use sync::{
 pub use mcp::{McpConfig, McpNode, mcp_node};
 pub use mcp::models::Models;
 pub use mcp::tools::{Tool, ToolRegistry};
+
+// Re-export MCP Protocol types
+pub use mcp::protocol::{MCPProtocolNode, MCPClientConfig, mcp_protocol_node};

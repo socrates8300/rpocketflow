@@ -1,4 +1,4 @@
-use anthropic::client::{Client, ClientBuilder};
+use anthropic::client::{Client as AnthropicClient, ClientBuilder};
 use anthropic::types::{Message, MessagesRequest, Role, ContentBlock};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -11,6 +11,7 @@ use crate::sync::{Node, NodeRef, NodeResult, Params, Shared, BaseNode, SyncNode}
 
 pub mod models;
 pub mod tools;
+pub mod protocol;
 #[cfg(test)]
 pub mod tests;
 
@@ -60,7 +61,7 @@ impl McpConfig {
 pub struct McpNode {
     base: BaseNode,
     config: McpConfig,
-    client: Client,
+    client: AnthropicClient,
     messages: Vec<(Role, String)>,
 }
 

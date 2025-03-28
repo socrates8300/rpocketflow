@@ -349,3 +349,204 @@ macro_rules! processing_chain {
         $crate::sync::node(chain)
     }}
 }
+
+/// Macro to create an MCP client node with protocol-level implementation
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::mcp_protocol_node_macro;
+/// use serde_json::json;
+///
+/// // Create an MCP client that launches a specific server command
+/// let mcp_node = mcp_protocol_node_macro! {
+///     name: "MCP Client",
+///     server_command: "/path/to/mcp_server",
+///     server_args: ["--config", "config.json"],
+///     client_name: "My Client",
+///     client_version: "1.0.0"
+/// };
+/// ```
+#[macro_export]
+macro_rules! mcp_protocol_node_macro {
+    (
+        name: $name:expr,
+        server_command: $server_cmd:expr
+        $(, server_args: [$($arg:expr),*])?
+        $(, client_name: $client_name:expr)?
+        $(, client_version: $client_version:expr)?
+        $(,)?
+    ) => {{
+        // First, create the configuration
+        let mut config = $crate::MCPClientConfig::new(
+            $($client_name)? .unwrap_or_else(|| "RPocketFlow Client"),
+            $($client_version)? .unwrap_or_else(|| env!("CARGO_PKG_VERSION"))
+        );
+        
+        // Add server command and args
+        let args = vec![$($($arg.to_string()),*)?];
+        config = config.with_server_command($server_cmd, args);
+        
+        // Create and return the node
+        $crate::mcp_protocol_node($name, config)
+    }};
+    
+    // Variation without server command (for future use with non-process servers)
+    (
+        name: $name:expr
+        $(, client_name: $client_name:expr)?
+        $(, client_version: $client_version:expr)?
+        $(,)?
+    ) => {{
+        // Create the configuration
+        let config = $crate::MCPClientConfig::new(
+            $($client_name)? .unwrap_or_else(|| "RPocketFlow Client"),
+            $($client_version)? .unwrap_or_else(|| env!("CARGO_PKG_VERSION"))
+        );
+        
+        // Create and return the node
+        $crate::mcp_protocol_node($name, config)
+    }};
+}
+
+/// Macro to create a Claude MCP node
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::claude_node_macro;
+///
+/// // Create a Claude node with API key and model
+/// let claude_node = claude_node_macro! {
+///     name: "Claude",
+///     api_key: "YOUR_API_KEY",
+///     model: "claude-3-sonnet-20240229",
+///     system_prompt: "You are a helpful assistant."
+/// };
+/// ```
+#[macro_export]
+macro_rules! claude_node_macro {
+    (
+        name: $name:expr,
+        api_key: $api_key:expr,
+        model: $model:expr
+        $(, system_prompt: $system_prompt:expr)?
+        $(, max_tokens: $max_tokens:expr)?
+        $(, temperature: $temperature:expr)?
+        $(,)?
+    ) => {{
+        // First, create the configuration
+        let mut config = $crate::McpConfig::new($api_key, $model);
+        
+        // Add optional parameters
+        $(config = config.with_system_prompt($system_prompt);)?
+        $(config = config.with_max_tokens($max_tokens);)?
+        $(config = config.with_temperature($temperature);)?
+        
+        // Create and return the node
+        $crate::mcp_node($name, config)
+    }};
+}
+
+/// Macro to easily create a tool handler node for MCP tools
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::mcp_tool_handler;
+/// use serde_json::json;
+///
+/// // Create a tool handler for a weather tool
+/// let weather_handler = mcp_tool_handler! {
+///     name: "WeatherHandler",
+///     tool_name: "get_weather",
+///     handler: |params| {
+///         let location = params.get("location")
+///             .and_then(|v| v.as_str())
+///             .unwrap_or("unknown");
+///             
+///         // In real code, you would call a weather API here
+///         Ok(json!({
+///             "temperature": 72,
+///             "condition": "sunny",
+///             "location": location
+///         }))
+///     }
+/// };
+/// ```
+#[macro_export]
+macro_rules! mcp_tool_handler {
+    (
+        name: $name:expr,
+        tool_name: $tool_name:expr,
+        handler: $handler:expr
+        $(,)?
+    ) => {{
+        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
+        use serde_json::{Value, json};
+        use std::collections::HashMap;
+        
+        struct ToolHandlerNode {
+            base: BaseNode,
+            tool_name: String,
+            handler: Box<dyn Fn(&Value) -> Result<Value, String> + Send>,
+        }
+        
+        impl ToolHandlerNode {
+            fn new(
+                name: impl Into<String>,
+                tool_name: impl Into<String>,
+                handler: impl Fn(&Value) -> Result<Value, String> + Send + 'static
+            ) -> Self {
+                Self {
+                    base: BaseNode::new(name),
+                    tool_name: tool_name.into(),
+                    handler: Box::new(handler),
+                }
+            }
+        }
+        
+        impl Node for ToolHandlerNode {
+            fn get_params(&self) -> &Params { &self.base.get_params() }
+            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
+            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
+                self.base.add_successor(action, successor);
+            }
+            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors()
+            }
+            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors_mut()
+            }
+            fn get_name(&self) -> &str { self.base.get_name() }
+        }
+        
+        impl SyncNode for ToolHandlerNode {
+            fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
+                match (self.handler)(prep_res) {
+                    Ok(result) => Ok(json!({
+                        "tool_name": self.tool_name,
+                        "result": result,
+                        "status": "success"
+                    })),
+                    Err(err) => Ok(json!({
+                        "tool_name": self.tool_name,
+                        "error": err,
+                        "status": "error"
+                    }))
+                }
+            }
+            
+            fn post(&mut self, shared: &mut Shared, _prep_res: &Value, exec_res: &Value) -> NodeResult<Value> {
+                // Store the result in shared state with a standard key pattern
+                shared.insert(format!("mcp_tool_result_{}", self.tool_name), exec_res.clone());
+                
+                // Return the appropriate action based on status
+                let status = exec_res.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                Ok(json!(status))
+            }
+        }
+        
+        $crate::sync::node(ToolHandlerNode::new($name, $tool_name, $handler))
+    }};
+}

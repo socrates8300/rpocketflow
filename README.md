@@ -10,12 +10,19 @@ RPocketFlow supports both synchronous and asynchronous execution models, enablin
 
 RPocketFlow offers a modular node-based architecture, making it easy to build and reuse workflow components. It supports both synchronous and asynchronous operations (using Tokio), intuitive flow control with branching and retry mechanisms, and shared state management for data passing between nodes. The builder-pattern API further minimizes boilerplate and helps you focus on your business logic, all while keeping dependencies to a minimum.
 
-Additionally, RPocketFlow includes integration with Anthropic's Model Context Protocol (MCP), making it easy to build AI-powered workflows using Claude models. The MCP integration supports:
+Additionally, RPocketFlow includes two types of MCP integrations:
 
-- Text-based conversations with Claude
-- Tool usage and function calling
-- Conversation history management
-- Seamless integration with RPocketFlow's node-based architecture
+1. **Anthropic Claude Integration**: Direct integration with Anthropic's API for Claude models, supporting:
+   - Text-based conversations with Claude
+   - Tool usage and function calling
+   - Conversation history management
+   - Seamless integration with RPocketFlow's node-based architecture
+
+2. **Model Context Protocol (MCP) Client**: Full MCP protocol client implementation that can connect to any MCP-compatible server, supporting:
+   - Connection to standard MCP protocol servers
+   - Tool discovery and execution 
+   - Standardized communication between AI models and external tools
+   - Integration with the full MCP ecosystem
 
 #### Installation
 
@@ -35,12 +42,17 @@ tokio = { version = "1.0", features = ["full"] }  # Required for async features
 async-trait = "0.1"  # Required for asynchronous trait support
 ```
 
-For MCP integration with Claude, add these dependencies:
+For MCP integrations, add these dependencies:
 
 ```toml
 [dependencies]
+# For Claude API integration
 anthropic = "0.0.8"  # Official Anthropic API client
 serde = { version = "1.0", features = ["derive"] }
+
+# For MCP protocol implementation
+mcpr = "0.1.0"       # Model Context Protocol for Rust
+env_logger = "0.10"  # Optional but recommended for logging
 ```
 
 #### Quick Start
@@ -285,6 +297,171 @@ registry.register(weather_tool);
 // (See the full example in examples/mcp_example.rs)
 ```
 
+#### MCP Protocol Client: Connecting to MCP Servers
+
+RPocketFlow provides a full implementation of the Model Context Protocol (MCP), allowing you to connect to any MCP-compatible server. This enables you to leverage a wide variety of AI models and tools in your workflows.
+
+Here's how to use the MCP Protocol client:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use std::collections::HashMap;
+use log::{info, error};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    env_logger::init_from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
+    
+    // Create MCP client configuration
+    let mcp_config = MCPClientConfig::new(
+        "MyApplication", 
+        "1.0.0"
+    );
+    
+    // Create MCP protocol node
+    let protocol_node = mcp_protocol_node("MCPClient", mcp_config);
+    
+    // Create input node
+    let input_node = node_impl! {
+        name: "UserInputNode",
+        exec: |_: &serde_json::Value| -> NodeResult<serde_json::Value> {
+            // In this example, we'll just call a specific tool
+            Ok(json!({
+                "tool_name": "echo",
+                "params": {
+                    "message": "Hello, MCP!"
+                }
+            }))
+        },
+        post: |shared: &mut Shared, _: &serde_json::Value, exec_res: &serde_json::Value| {
+            shared.insert("mcp_tool_call".to_string(), exec_res.clone());
+            Ok(json!("default"))
+        }
+    };
+    
+    // Create output node
+    let output_node = node_impl! {
+        name: "OutputNode",
+        exec: |_: &serde_json::Value| {
+            Ok(json!(null))
+        },
+        post: |shared: &mut Shared, _: &serde_json::Value, _: &serde_json::Value| {
+            // Display the result from the MCP call
+            if let Some(result) = shared.get("mcp_exec_result") {
+                println!("\nMCP Result:");
+                println!("{}", serde_json::to_string_pretty(result).unwrap());
+            }
+            
+            Ok(json!("terminate"))
+        }
+    };
+    
+    // Define the flow
+    let flow = flow! {
+        name: "MCP Protocol Flow",
+        start: input_node.clone(),
+        connections: [
+            (input_node.clone(), "default", protocol_node.clone()),
+            (protocol_node.clone(), "success", output_node.clone()),
+            (protocol_node.clone(), "error", output_node.clone())
+        ]
+    };
+    
+    // Initialize shared state
+    let mut shared = HashMap::new();
+    
+    // Run the flow
+    info!("Starting MCP Protocol flow...");
+    match flow.orchestrate(&mut shared, None) {
+        Ok(_) => info!("Flow completed successfully"),
+        Err(e) => error!("Flow failed: {}", e),
+    }
+    
+    Ok(())
+}
+```
+
+##### Creating an MCP Server
+
+You can also create an MCP server using the mcpr crate. Here's a simple example:
+
+```rust
+use log::{error, info};
+use mcpr::{
+    error::MCPError,
+    server::{Server, ServerConfig},
+    transport::stdio::StdioTransport,
+    Tool,
+};
+use serde_json::{json, Value};
+
+#[tokio::main]
+async fn main() -> Result<(), MCPError> {
+    // Initialize logging
+    env_logger::init_from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
+
+    // Configure the server
+    let server_config = ServerConfig::new()
+        .with_name("My MCP Server")
+        .with_version("1.0.0")
+        .with_tool(Tool {
+            name: "echo".to_string(),
+            description: Some("Echo back the input".to_string()),
+            input_schema: mcpr::schema::common::ToolInputSchema {
+                r#type: "object".to_string(),
+                properties: Some(
+                    [
+                        (
+                            "message".to_string(),
+                            json!({
+                                "type": "string",
+                                "description": "The message to echo"
+                            }),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                required: Some(vec!["message".to_string()]),
+            },
+        });
+
+    // Create the server
+    let mut server = Server::new(server_config);
+
+    // Register tool handlers
+    server.register_tool_handler("echo", |params: Value| {
+        let message = params
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| MCPError::Protocol("Missing message".to_string()))?;
+
+        info!("Echo handler called with message: {}", message);
+
+        let response = json!({
+            "echo": message
+        });
+
+        Ok(response)
+    })?;
+
+    // Create a transport
+    let transport = StdioTransport::new();
+
+    // Start the server
+    info!("Starting MCP server...");
+    server.start(transport)?;
+
+    Ok(())
+}
+```
+
 #### MCP Integration: Troubleshooting
 
 If you encounter issues with the MCP integration, here are some common problems and solutions:
@@ -472,19 +649,626 @@ impl SyncNode for CustomNode {
 }
 ```
 
-#### Best Practices for RPocketFlow Applications
+## Model Context Protocol (MCP) Integration Guide
 
-##### Environment Setup
+RPocketFlow provides robust support for the Model Context Protocol (MCP), with two complementary implementations:
+
+1. **Direct Claude Integration** - Built-in integration with Anthropic's Claude AI models
+2. **Full Protocol Implementation** - Complete MCP client implementation that works with any MCP-compatible server
+
+### What is Model Context Protocol?
+
+Model Context Protocol (MCP) is an open standard designed to connect AI assistants with external tools, data sources, and services. It establishes a bidirectional communication channel through which models can:
+
+1. Discover available tools and capabilities
+2. Call external tools with structured parameters
+3. Receive structured responses from those tools
+4. Integrate external data into their context and reasoning
+
+### Implementation Overview
+
+| Feature | Claude Integration | Protocol Implementation |
+|---------|-------------------|------------------------|
+| **Integration Type** | Direct API | Protocol-level |
+| **Compatibility** | Claude models only | Any MCP server |
+| **Setup Complexity** | Simple (API key) | Moderate (server required) |
+| **Function Calling** | Built-in | Server-dependent |
+| **Server Management** | None needed | Automatic or manual |
+| **Use Case** | AI text generation | Custom tool integration |
+
+### Setting Up an MCP Client
+
+To use the MCP implementation in RPocketFlow, follow these steps:
+
+#### Option 1: Claude Direct Integration
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use std::env;
+
+// Use the Claude macro for the simplest setup
+let claude_node = claude_node_macro! {
+    name: "Claude",
+    api_key: env::var("ANTHROPIC_API_KEY").expect("API key required"),
+    model: Models::CLAUDE_3_HAIKU,
+    system_prompt: "You are a helpful assistant.",
+    max_tokens: 1000
+};
+
+// Create a simple flow with input and output nodes
+let input_node = node_impl! {
+    name: "Input",
+    exec: |_| Ok(json!("Tell me about Rust programming.")),
+    post: |shared, _, exec_res| {
+        shared.insert("mcp_input".to_string(), exec_res.clone());
+        Ok(json!("default"))
+    }
+};
+
+let output_node = node_impl! {
+    name: "Output",
+    post: |shared, _, _| {
+        if let Some(output) = shared.get("mcp_output") {
+            println!("Claude says: {}", output);
+        }
+        Ok(json!("default"))
+    }
+};
+
+// Create and run the flow
+let flow = flow! {
+    name: "Claude Flow",
+    nodes: [input_node, claude_node, output_node]
+};
+```
+
+#### Option 2: Protocol-Level Implementation
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create MCP client configuration
+let mcp_config = MCPClientConfig::new(
+    "My Application", 
+    "1.0.0"
+)
+.with_server_command(
+    "/path/to/mcp/server",  // Path to the MCP server executable
+    vec!["--arg1", "--arg2"] // Optional arguments
+);
+
+// Create an MCP node for your flow
+let mcp_client_node = mcp_protocol_node("MCP Client", mcp_config);
+```
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use std::collections::HashMap;
+use std::path::Path;
+
+// Use the MCP Protocol macro for simple setup
+let mcp_node = mcp_protocol_node_macro! {
+    name: "MCP Client",
+    server_command: "/path/to/mcp_server",
+    server_args: ["--option", "value"]
+};
+
+// Create input node that specifies which tool to call
+let input_node = node_impl! {
+    name: "Input",
+    exec: |_| Ok(json!({
+        "tool_name": "echo",
+        "params": {
+            "message": "Hello, MCP Protocol!"
+        }
+    })),
+    post: |shared, _, exec_res| {
+        shared.insert("mcp_tool_call".to_string(), exec_res.clone());
+        Ok(json!("default"))
+    }
+};
+
+// Create output node to process results
+let output_node = node_impl! {
+    name: "Output",
+    post: |shared, _, _| {
+        if let Some(result) = shared.get("mcp_exec_result") {
+            // Results are structured with status and tool info
+            if let Some(status) = result.get("status").and_then(|s| s.as_str()) {
+                match status {
+                    "success" => {
+                        let tool_result = result.get("result").unwrap();
+                        println!("Tool succeeded: {}", tool_result);
+                    },
+                    "error" => {
+                        let error = result.get("error").unwrap();
+                        println!("Tool failed: {}", error);
+                    },
+                    _ => println!("Unknown status")
+                }
+            }
+        }
+        Ok(json!("default"))
+    }
+};
+
+// Create and run the flow
+let flow = flow! {
+    name: "MCP Protocol Flow",
+    start: input_node.clone(),
+    connections: [
+        (input_node.clone(), "default", mcp_node.clone()),
+        (mcp_node.clone(), "success", output_node.clone()),
+        (mcp_node.clone(), "error", output_node.clone())
+    ]
+};
+
+// Run the flow
+let mut shared = HashMap::new();
+flow.orchestrate(&mut shared, None)?;
+```
+
+### Creating Tool Integrations
+
+RPocketFlow makes it easy to create tool integrations for MCP:
+
+```rust
+// Create MCP tool handlers with the dedicated macro
+let weather_tool = mcp_tool_handler! {
+    name: "WeatherTool",
+    tool_name: "get_weather",
+    handler: |params| {
+        // Extract parameters
+        let location = params.get("location")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+            
+        // Call external API or service (simulated)
+        let temp = 72; // Would come from API
+        let condition = "sunny";
+        
+        // Return structured result
+        Ok(json!({
+            "temperature": temp,
+            "condition": condition,
+            "location": location
+        }))
+    }
+};
+
+// Use the tool in a flow
+let flow = flow! {
+    name: "Weather Flow",
+    start: input_node.clone(),
+    connections: [
+        (input_node.clone(), "default", weather_tool.clone()),
+        (weather_tool.clone(), "success", output_node.clone()),
+        (weather_tool.clone(), "error", error_node.clone())
+    ]
+};
+```
+
+#### Creating an MCP Server
+
+RPocketFlow also supports creating MCP-compatible servers. Here's how to implement a basic MCP server:
+
+```rust
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    env_logger::init();
+
+    // We'll use stdio for communication
+    let stdin = std::io::stdin();
+    let mut stdin = BufReader::new(stdin);
+    let mut stdout = std::io::stdout();
+    
+    // Server information for initialization responses
+    let server_info = json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "serverInfo": {
+                "name": "My MCP Server",
+                "version": "1.0.0"
+            },
+            "protocolVersion": "0.1",
+            "capabilities": {
+                "tools": ["my_tool"]
+            }
+        },
+        "id": 1
+    });
+    
+    // Main loop to process incoming messages
+    let mut buffer = String::new();
+    loop {
+        // Read a line from stdin
+        buffer.clear();
+        if stdin.read_line(&mut buffer).unwrap() == 0 {
+            break; // EOF reached
+        }
+        
+        // Parse the message
+        let message: Value = match serde_json::from_str(&buffer) {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("Failed to parse message: {}", e);
+                continue;
+            }
+        };
+        
+        // Process message based on method
+        let method = message.get("method").and_then(|m| m.as_str());
+        let id = message.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+        
+        let response = match method {
+            Some("initialize") => server_info.clone(),
+            Some("tools/list") => {
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "my_tool",
+                                "description": "Description of my tool"
+                            }
+                        ]
+                    },
+                    "id": id
+                })
+            },
+            Some("my_tool") => {
+                // Example tool implementation
+                // Extract parameters and execute tool logic here
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "output": "Tool executed successfully"
+                    },
+                    "id": id
+                })
+            },
+            Some("shutdown") => {
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": null,
+                    "id": id
+                })
+            },
+            _ => {
+                json!({
+                    "jsonrpc": "2.0",
+                    "error": {
+                        "code": -32601,
+                        "message": "Method not found"
+                    },
+                    "id": id
+                })
+            }
+        };
+        
+        // Send the response
+        let response_str = serde_json::to_string(&response).unwrap();
+        writeln!(stdout, "{}", response_str).unwrap();
+        stdout.flush().unwrap();
+        
+        // If shutdown was called, exit the loop
+        if method == Some("shutdown") {
+            break;
+        }
+    }
+    
+    Ok(())
+}
+```
+
+#### MCP Protocol Details
+
+The MCP implementation in RPocketFlow follows these key protocol steps:
+
+1. **Initialization**: The client connects to the server and exchanges capability information.
+2. **Tool Discovery**: The client can request a list of available tools from the server.
+3. **Tool Invocation**: The client can call specific tools with structured parameters.
+4. **Shutdown**: The client can gracefully close the connection when done.
+
+All communication uses JSON-RPC 2.0 format with these standard methods:
+
+- `initialize`: Establishes the connection and exchanges capabilities.
+- `tools/list`: Retrieves available tools from the server.
+- `<tool_name>`: Calls a specific tool with parameters.
+- `shutdown`: Closes the connection gracefully.
+
+#### Advanced MCP Features
+
+##### Custom Transport Layers
+
+While the default implementation uses stdio for communication, you can implement custom transport layers for different communication channels:
+
+```rust
+// Example of using a custom command for an MCP server
+let mcp_config = MCPClientConfig::new("MyApp", "1.0")
+    .with_server_command("/path/to/server", vec!["--port", "8080"]);
+```
+
+##### Tool Error Handling
+
+Proper error handling for MCP tool calls:
+
+```rust
+// In your flow's output node
+match exec_res.get("status").and_then(|s| s.as_str()) {
+    Some("success") => {
+        // Process successful result
+        let result = exec_res.get("result").unwrap();
+        println!("Tool succeeded with result: {}", result);
+    },
+    Some("error") => {
+        // Handle error
+        let error = exec_res.get("error").unwrap();
+        println!("Tool failed with error: {}", error);
+    },
+    _ => {
+        println!("Unknown status in MCP response");
+    }
+}
+```
+
+##### Advanced Tool Parameters
+
+Working with complex MCP tool parameters is straightforward:
+
+```rust
+// Complex nested parameters for database search
+let search_node = node_impl! {
+    name: "DatabaseSearch",
+    exec: |_| {
+        let complex_params = json!({
+            "query": {
+                "filters": [
+                    {"field": "name", "op": "contains", "value": "test"},
+                    {"field": "status", "op": "equals", "value": "active"}
+                ],
+                "sort": {"field": "created_at", "direction": "desc"},
+                "limit": 10
+            },
+            "options": {
+                "include_metadata": true,
+                "format": "json"
+            }
+        });
+        
+        Ok(json!({
+            "tool_name": "search_database",
+            "params": complex_params
+        }))
+    },
+    post: |shared, _, exec_res| {
+        shared.insert("mcp_tool_call".to_string(), exec_res.clone());
+        Ok(json!("default"))
+    }
+};
+```
+
+##### Complete Example: AI-Powered Data Analysis Flow
+
+Here's a complete example combining Claude's AI capabilities with custom MCP tools:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use std::collections::HashMap;
+use std::env;
+
+// Create an AI assistant node
+let claude = claude_node_macro! {
+    name: "Claude",
+    api_key: env::var("ANTHROPIC_API_KEY").expect("API key required"),
+    model: Models::CLAUDE_3_SONNET,
+    system_prompt: "You are a data analysis assistant."
+};
+
+// Create data processing tools
+let data_tool = mcp_tool_handler! {
+    name: "DataProcessor",
+    tool_name: "process_data",
+    handler: |params| {
+        // Process data and return results
+        Ok(json!({
+            "processed_data": [1, 2, 3, 4, 5],
+            "statistics": {
+                "mean": 3.0,
+                "median": 3,
+                "std_dev": 1.58
+            }
+        }))
+    }
+};
+
+// Create a flow with branching logic
+let flow = flow! {
+    name: "AI Data Analysis",
+    start: input_node.clone(),
+    connections: [
+        // Route user query to Claude
+        (input_node.clone(), "query", claude.clone()),
+        
+        // Route data processing requests to the data tool
+        (input_node.clone(), "process", data_tool.clone()),
+        
+        // Send Claude's response to the output node
+        (claude.clone(), "default", output_node.clone()),
+        
+        // Send data processing results to Claude for explanation
+        (data_tool.clone(), "success", claude.clone()),
+        
+        // Error handling path
+        (data_tool.clone(), "error", error_node.clone())
+    ]
+};
+```
+
+#### Comparing MCP Implementations in RPocketFlow
+
+RPocketFlow offers two complementary MCP implementations for different use cases:
+
+##### 1. Anthropic Claude Integration (`McpNode`)
+
+This implementation provides direct integration with Anthropic's Claude AI models using their API:
+
+- **Direct access** to Claude models via Anthropic's API
+- Built-in support for Claude's function calling capabilities
+- Simple setup using API keys
+- No need for external servers or processes
+- Limited to Anthropic's models and features
+
+**Example usage:**
+
+```rust
+// Create config with API key
+let mcp_config = McpConfig::new(
+    "YOUR_ANTHROPIC_API_KEY", 
+    Models::CLAUDE_3_SONNET
+);
+
+// Create a Claude MCP node
+let claude_node = mcp_node("ClaudeNode", mcp_config);
+```
+
+##### 2. Protocol-Level Implementation (`MCPProtocolNode`)
+
+This implementation provides a full protocol-level client that can connect to any MCP-compatible server:
+
+- Works with **any MCP server** implementation
+- Supports custom tools and services
+- Can launch and manage server processes
+- More flexible but requires an external server
+- Compatible with the broader MCP ecosystem
+
+**Example usage:**
+
+```rust
+// Create config with server command
+let mcp_config = MCPClientConfig::new(
+    "MyClient", 
+    "1.0.0"
+)
+.with_server_command("/path/to/server", vec![]);
+
+// Create a protocol-level MCP node
+let mcp_node = mcp_protocol_node("MCPNode", mcp_config);
+```
+
+##### When to Use Each Implementation:
+
+- Use `McpNode` (Claude integration) when:
+  - You need direct access to Claude AI models
+  - You want simple setup without external services
+  - You're focusing on natural language tasks
+
+- Use `MCPProtocolNode` (protocol-level) when:
+  - You need to use custom MCP-compatible tools/servers
+  - You want to integrate with non-Anthropic MCP servers
+  - You're building a system with multiple specialized tools
+  - You need more control over the MCP communication process
+
+#### MCP Convenience Macros
+
+RPocketFlow provides several macros to simplify working with MCP:
+
+##### 1. Creating an MCP Protocol Client
+
+```rust
+// Using the macro (concise)
+let mcp_node = mcp_protocol_node_macro! {
+    name: "MCP Client",
+    server_command: "/path/to/mcp_server",
+    server_args: ["--port", "8080"],
+    client_name: "My Client",
+    client_version: "1.0.0"
+};
+
+// Equivalent without macro (verbose)
+let config = MCPClientConfig::new("My Client", "1.0.0")
+    .with_server_command("/path/to/mcp_server", vec!["--port".to_string(), "8080".to_string()]);
+let mcp_node = mcp_protocol_node("MCP Client", config);
+```
+
+##### 2. Creating a Claude Node
+
+```rust
+// Using the macro (concise)
+let claude_node = claude_node_macro! {
+    name: "Claude Assistant",
+    api_key: api_key,
+    model: Models::CLAUDE_3_SONNET,
+    system_prompt: "You are a helpful coding assistant.",
+    max_tokens: 2000,
+    temperature: 0.7
+};
+
+// Equivalent without macro (verbose)
+let config = McpConfig::new(api_key, Models::CLAUDE_3_SONNET)
+    .with_system_prompt("You are a helpful coding assistant.")
+    .with_max_tokens(2000)
+    .with_temperature(0.7);
+let claude_node = mcp_node("Claude Assistant", config);
+```
+
+##### 3. Creating Tool Handler Nodes
+
+```rust
+// Using the macro (concise)
+let weather_handler = mcp_tool_handler! {
+    name: "WeatherHandler",
+    tool_name: "get_weather",
+    handler: |params| {
+        let location = params.get("location")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+            
+        // In real code, you would call a weather API here
+        Ok(json!({
+            "temperature": 72,
+            "condition": "sunny",
+            "location": location
+        }))
+    }
+};
+
+// The macro handles all the boilerplate of creating a node that:
+// 1. Takes parameters from prep_res
+// 2. Calls your handler function
+// 3. Formats success/error responses correctly
+// 4. Stores results in shared state using a consistent naming pattern
+// 5. Returns appropriate actions based on execution status
+```
+
+### Best Practices for RPocketFlow Applications
+
+#### Environment Setup
 
 - **Environment Variables**: Always use a `.env` file with the `dotenv` crate for configuration
 - **API Key Management**: Load and validate API keys early in the application lifecycle
 - **Logging**: Configure proper logging to help diagnose flow execution issues
 
-##### Error Handling
+#### Error Handling
 
 - Add appropriate timeouts when waiting for external services
 - Include fallback behavior when external services (like MCP servers) are unavailable
 - When using tool integrations, implement proper error handling for API calls
+
+### Conclusion
+
+RPocketFlow's MCP implementation provides a powerful way to integrate AI capabilities and external tools into your Rust applications. With both direct Claude integration and protocol-level MCP support, you have the flexibility to choose the approach that best fits your needs.
+
+The convenience macros make it easy to set up MCP nodes, create tool handlers, and build complex flows with minimal boilerplate. Whether you're building a simple AI-powered application or a complex system with multiple specialized tools, RPocketFlow's MCP support has you covered.
+
+For more examples and detailed API documentation, check out the [examples](./examples/) directory and the [API documentation](https://docs.rs/rpocketflow).
 
 ##### Testing MCP Integrations
 
