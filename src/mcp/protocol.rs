@@ -518,3 +518,48 @@ pub fn mcp_protocol_node(name: impl Into<String>, config: MCPClientConfig) -> No
     Arc::new(Mutex::new(node))
 }
 
+/// Helper function to create an MCP client config for a stdio-based MCP server
+/// 
+/// This simplifies connecting to an MCP server that uses standard input/output
+/// for communication, which is common for local tool integrations.
+/// 
+/// # Arguments
+/// 
+/// * `client_name` - Name of the client application
+/// * `client_version` - Version of the client application
+/// * `server_command` - Path to the MCP server executable
+/// * `server_args` - Optional arguments to pass to the server executable
+/// 
+/// # Example
+/// 
+/// ```
+/// use rpocketflow::*;
+/// use rpocketflow::mcp::mcp_stdio_config;
+/// 
+/// let config = mcp_stdio_config(
+///     "My Application",
+///     "1.0.0",
+///     "./path/to/mcp_server",
+///     &["--arg1", "--arg2"]
+/// );
+/// 
+/// let mcp_node = mcp_protocol_node("MCP", config);
+/// ```
+pub fn mcp_stdio_config<S1, S2, S3, S4>(
+    client_name: S1,
+    client_version: S2,
+    server_command: S3,
+    server_args: &[S4],
+) -> MCPClientConfig 
+where
+    S1: Into<String>,
+    S2: Into<String>,
+    S3: Into<String>,
+    S4: AsRef<str>,
+{
+    let args: Vec<String> = server_args.iter().map(|arg| arg.as_ref().to_string()).collect();
+    
+    MCPClientConfig::new(client_name, client_version)
+        .with_server_command(server_command, args)
+}
+

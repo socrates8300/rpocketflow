@@ -387,7 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ##### Creating an MCP Server
 
-You can also create an MCP server using the mcpr crate. Here's a simple example:
+You can create an MCP server using the `mcpr` crate. Here's a simple example:
 
 ```rust
 use log::{error, info};
@@ -461,6 +461,37 @@ async fn main() -> Result<(), MCPError> {
     Ok(())
 }
 ```
+
+#### Using Stdio-based MCP Servers
+
+Many MCP tools communicate over standard input/output (stdio) instead of network sockets. RPocketFlow provides convenient helpers for working with these stdio-based MCP servers:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create an MCP client config for a stdio-based server
+let config = mcp_stdio_config(
+    "My Application",  // Client name
+    "1.0.0",           // Client version
+    "./path/to/mcp_server_executable",  // Server executable path
+    vec!["--option1", "value1"]         // Optional server arguments
+);
+
+// Create an MCP protocol node with this config
+let mcp_node = mcp_protocol_node("MCP Client", config);
+
+// Now you can use this node in your flow to interact with the stdio-based MCP server
+```
+
+When building an application that uses stdio-based MCP servers:
+
+1. **Server Startup Management**: RPocketFlow automatically handles launching the server process
+2. **Error Handling**: The protocol handles startup failures and connection issues
+3. **Process Cleanup**: When your node is dropped, the server process is automatically terminated
+4. **Bidirectional Communication**: Messages are sent to the server's stdin and received from stdout
+
+This approach is especially useful for integrating with standalone MCP tools like database connectors, code analyzers, or specialized APIs that are packaged as separate executables.
 
 #### MCP Integration: Troubleshooting
 

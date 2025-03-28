@@ -1,6 +1,7 @@
 #![allow(unused)]
 use log::{error, info};
 use rpocketflow::*;
+use rpocketflow::mcp::mcp_stdio_config;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::Write;
@@ -20,9 +21,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Create MCP client configuration
-    let mcp_config = MCPClientConfig::new("RPocketFlow Example", "0.1.0")
-        .with_server_command(server_path.to_string_lossy().to_string(), vec![]);
+    // Create MCP client configuration using the helper function for stdio-based MCP servers
+    let mcp_config = mcp_stdio_config(
+        "RPocketFlow Example", 
+        "0.1.0",
+        server_path.to_string_lossy().to_string(), 
+        &[] as &[&str] // No additional arguments
+    );
 
     // Create nodes for the flow
     let protocol_node = mcp_protocol_node("MCPProtocolNode", mcp_config);

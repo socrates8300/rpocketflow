@@ -15,6 +15,9 @@ pub mod protocol;
 #[cfg(test)]
 pub mod tests;
 
+// Re-export the stdio config helper for easier access
+pub use protocol::mcp_stdio_config;
+
 /// MCP client configuration for communicating with Anthropic's API
 #[derive(Clone)]
 pub struct McpConfig {
