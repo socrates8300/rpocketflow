@@ -1,17 +1,3 @@
-Okay, let's refine that README to provide a clearer, more accurate, and developer-friendly experience, incorporating the fixes and decisions we've made.
-
-**Key Improvements:**
-
-1.  **Clear Separation:** Explicitly separate examples and explanations for Synchronous (`Flow`) and Asynchronous (`AsyncFlow`) workflows.
-2.  **Corrected Examples:** Fix all examples that incorrectly mixed sync/async components. Async examples now exclusively use `AsyncFlow`, `AsyncNodeRef`, `async_node`, `async_flow!`, etc.
-3.  **Accurate Installation:** Clarify which dependencies are needed for which features (core, async, specific integrations). Clarify the role of `mcpr`.
-4.  **Refined Macro Section:** Remove the problematic `async_node_impl!` for now. Show better examples for `async_flow!`.
-5.  **Streamlined MCP Section:** Consolidate redundant MCP information, keeping the comparison table and protocol details. Clearly label the server example as external.
-6.  **Clarity and Readability:** Improved formatting, added subsections, and refined explanations.
-7.  **Added Async Custom Node Example:** Provides a parallel to the sync version.
-8.  **Updated Troubleshooting:** Includes points about the sync/async boundary.
-
-```markdown
 # RPocketFlow
 
 A lightweight, flexible workflow orchestration library for Rust that simplifies the creation and execution of complex, potentially agent-based, workflows with minimal overhead. Supports both synchronous and asynchronous execution models.
@@ -734,4 +720,4 @@ RPocketFlow is licensed under the MIT License. See the `LICENSE` file for detail
 ## Contributing
 
 Contributions are welcome! Please follow standard GitHub fork & pull request workflows. Ensure tests pass (`cargo test --workspace`) and code is formatted (`cargo fmt`) and linted (`cargo clippy --workspace -- -D warnings`).
-```
+
