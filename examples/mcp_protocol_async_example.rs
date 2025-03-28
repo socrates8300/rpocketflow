@@ -1,7 +1,5 @@
-#![allow(unused)]
 use log::{error, info};
 use rpocketflow::*;
-use rpocketflow::async_node::{AsyncNode, async_node, async_then, async_when, AsyncNodeImpl};
 use rpocketflow::mcp::mcp_stdio_config;
 use serde_json::json;
 use std::collections::HashMap;
@@ -33,7 +31,7 @@ impl Node for AsyncUserInputNode {
     fn get_wait_duration(&self) -> std::time::Duration { self.base.get_wait_duration() }
 }
 
-// Minimal SyncNode implementation for compatibility
+// Minimal SyncNode implementation
 impl SyncNode for AsyncUserInputNode {}
 
 #[async_trait]
@@ -151,7 +149,7 @@ impl Node for AsyncOutputNode {
     fn get_wait_duration(&self) -> std::time::Duration { self.base.get_wait_duration() }
 }
 
-// Minimal SyncNode implementation for compatibility
+// Minimal SyncNode implementation
 impl SyncNode for AsyncOutputNode {}
 
 #[async_trait]
@@ -206,10 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[] as &[&str] // No additional arguments
     );
 
-    // Create nodes with proper async implementations
+    // Create the nodes with proper async implementations
     let protocol_node = mcp_protocol_node("MCPProtocolNode", mcp_config);
-    let async_input_node = async_node(AsyncUserInputNode::new("UserInputNode"));
-    let async_output_node = async_node(AsyncOutputNode::new("OutputNode"));
+    let async_input_node = async_node(AsyncUserInputNode::new("AsyncUserInputNode"));
+    let async_output_node = async_node(AsyncOutputNode::new("AsyncOutputNode"));
 
     // Create an async flow
     let async_flow = async_flow! {
@@ -235,4 +233,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

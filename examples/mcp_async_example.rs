@@ -1,6 +1,4 @@
-#![allow(unused)]
 use rpocketflow::*;
-use rpocketflow::async_node::{AsyncNode, async_node, async_then, async_when, AsyncNodeImpl};
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
@@ -8,14 +6,16 @@ use async_trait::async_trait;
 
 use rpocketflow::mcp::tools::{string_param, Tool, ToolRegistry};
 
-// Define a custom AsyncNode for user input
+/// A simple node for reading user input asynchronously
 struct AsyncUserInputNode {
     base: AsyncNodeImpl,
 }
 
 impl AsyncUserInputNode {
     fn new(name: impl Into<String>) -> Self {
-        Self { base: AsyncNodeImpl::new(name) }
+        Self { 
+            base: AsyncNodeImpl::new(name) 
+        }
     }
 }
 
@@ -30,7 +30,7 @@ impl Node for AsyncUserInputNode {
     fn get_wait_duration(&self) -> std::time::Duration { self.base.get_wait_duration() }
 }
 
-// Implement SyncNode for compatibility
+// Minimal SyncNode implementation
 impl SyncNode for AsyncUserInputNode {}
 
 #[async_trait]
@@ -38,7 +38,7 @@ impl AsyncNode for AsyncUserInputNode {
     async fn exec_async(&mut self, _prep_res: &serde_json::Value) -> NodeResult<serde_json::Value> {
         println!("Ask about the weather in a specific location:");
         
-        // Use spawn_blocking for I/O to avoid blocking async runtime
+        // Create a separate task for reading input to avoid blocking the async runtime
         let input = tokio::task::spawn_blocking(|| {
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).expect("Failed to read input");
@@ -66,14 +66,16 @@ impl AsyncNode for AsyncUserInputNode {
     }
 }
 
-// Define a custom AsyncNode for output handling
+/// A simple node for displaying output and getting continuation asynchronously
 struct AsyncOutputNode {
     base: AsyncNodeImpl,
 }
 
 impl AsyncOutputNode {
     fn new(name: impl Into<String>) -> Self {
-        Self { base: AsyncNodeImpl::new(name) }
+        Self { 
+            base: AsyncNodeImpl::new(name) 
+        }
     }
 }
 
@@ -88,18 +90,18 @@ impl Node for AsyncOutputNode {
     fn get_wait_duration(&self) -> std::time::Duration { self.base.get_wait_duration() }
 }
 
-// Implement SyncNode for compatibility
+// Minimal SyncNode implementation
 impl SyncNode for AsyncOutputNode {}
 
 #[async_trait]
 impl AsyncNode for AsyncOutputNode {
     async fn exec_async(&mut self, _prep_res: &serde_json::Value) -> NodeResult<serde_json::Value> {
-        // No processing needed
+        // Doesn't need to do any processing
         Ok(json!(null))
     }
     
     async fn post_async(&mut self, shared: &mut Shared, _prep_res: &serde_json::Value, _exec_res: &serde_json::Value) -> NodeResult<serde_json::Value> {
-        // Display MCP output
+        // Display the MCP output
         if let Some(output) = shared.get("mcp_output") {
             if let Some(text) = output.as_str() {
                 println!("\nClaude's response:");
@@ -107,10 +109,10 @@ impl AsyncNode for AsyncOutputNode {
             }
         }
 
-        // Ask if user wants to continue
+        // Ask if the user wants to continue
         println!("Do you want to continue? (yes/no)");
         
-        // Use spawn_blocking for I/O
+        // Create a separate task for reading input to avoid blocking
         let input = tokio::task::spawn_blocking(|| {
             let mut input = String::new();
             std::io::stdin().read_line(&mut input).expect("Failed to read input");
@@ -195,10 +197,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register(weather_tool);
 
     // Create pure async nodes
-    let async_input_node = async_node(AsyncUserInputNode::new("UserInputNode"));
-    let async_output_node = async_node(AsyncOutputNode::new("OutputNode"));
+    let async_input_node = async_node(AsyncUserInputNode::new("AsyncInputNode"));
+    let async_output_node = async_node(AsyncOutputNode::new("AsyncOutputNode"));
     
-    // Create MCP node (already returns AsyncNodeRef)
+    // Create MCP node (already an AsyncNode)
     let mcp_node = mcp_node("ClaudeNode", mcp_config);
 
     // Create an async flow
@@ -215,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize shared state
     let mut shared = HashMap::new();
 
-    // Run the flow asynchronously
+    // Run the async flow
     match async_flow.orchestrate(&mut shared, None).await {
         Ok(_) => println!("Flow completed successfully"),
         Err(e) => eprintln!("Flow failed: {}", e),
@@ -223,4 +225,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
