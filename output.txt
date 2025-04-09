@@ -1,0 +1,2977 @@
+### ./src/lib.rs
+
+```rust
+pub mod async_node;
+pub mod macros;
+pub mod improved_macros;  // New module
+pub mod macros_tests;
+pub mod sync;
+pub mod mcp;
+
+// Re-export common types for convenience
+pub use async_node::{AsyncFlow, AsyncNode, AsyncNodeImpl};
+pub use sync::{
+    node, then, when, Action, BaseNode, ConditionalTransition, Flow, Node, NodeRef, NodeResult,
+    Params, Shared, SyncNode,
+};
+
+// Note: Macros defined with #[macro_export] are automatically available at crate root
+// The following macros are available: node_impl, flow, decision_node, processing_chain
+
+// Re-export MCP types
+pub use mcp::{McpConfig, McpNode, mcp_node};
+pub use mcp::models::Models;
+pub use mcp::tools::{Tool, ToolRegistry};
+
+// Re-export improved macros
+// These are automatically available at crate root because of #[macro_export]
+
+
+```
+
+### ./src/mcp/tools.rs
+
+```rust
+use std::collections::HashMap;
+use serde::{Serialize, Deserialize};
+use serde_json::{Value, json};
+
+/// Represents a function that can be called by the model
+#[derive(Serialize, Deserialize)]
+pub struct Tool {
+    /// The name of the tool
+    pub name: String,
+    /// A description of what the tool does
+    pub description: String,
+    /// The parameters the tool accepts in JSON Schema format
+    pub parameters: Value,
+    /// The function to execute when the tool is called
+    #[serde(skip)]
+    pub handler: Option<ToolHandler>,
+}
+
+impl std::fmt::Debug for Tool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tool")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("parameters", &self.parameters)
+            .field("handler", &self.handler.is_some())
+            .finish()
+    }
+}
+
+/// Function handler for tools
+pub type ToolHandler = Box<dyn Fn(Value) -> Result<Value, String> + Send + Sync>;
+
+impl Clone for Tool {
+    fn clone(&self) -> Self {
+        // Create a new tool without the handler
+        Tool {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            parameters: self.parameters.clone(),
+            handler: None,
+        }
+    }
+}
+
+impl Tool {
+    pub fn new(name: impl Into<String>, description: impl Into<String>, parameters: Value) -> Self {
+        Tool {
+            name: name.into(),
+            description: description.into(),
+            parameters,
+            handler: None,
+        }
+    }
+
+    pub fn with_handler<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Value) -> Result<Value, String> + Send + Sync + 'static,
+    {
+        self.handler = Some(Box::new(handler));
+        self
+    }
+
+    /// Convert to Anthropic's tool format
+    pub fn to_function_declaration(&self) -> Value {
+        json!({
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters
+        })
+    }
+
+    /// Execute the tool with the given arguments
+    pub fn execute(&self, args: Value) -> Result<Value, String> {
+        match &self.handler {
+            Some(handler) => handler(args),
+            None => Err(format!("No handler defined for tool {}", self.name)),
+        }
+    }
+}
+
+/// A registry of tools that can be used in an MCP conversation
+pub struct ToolRegistry {
+    tools: HashMap<String, Tool>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self {
+        ToolRegistry {
+            tools: HashMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, tool: Tool) {
+        self.tools.insert(tool.name.clone(), tool);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Tool> {
+        self.tools.get(name)
+    }
+
+    pub fn get_all(&self) -> Vec<&Tool> {
+        self.tools.values().collect()
+    }
+
+    pub fn to_tool_declarations(&self) -> Vec<Value> {
+        self.tools.values()
+            .map(|tool| tool.to_function_declaration())
+            .collect()
+    }
+
+    /// Process tool calls from a model response
+    pub fn process_tool_call(&self, name: &str, args: Value) -> Value {
+        // Try to execute the function
+        let result = match self.get(name) {
+            Some(tool) => tool.execute(args.clone()),
+            None => Err(format!("Tool not found: {}", name)),
+        };
+        
+        // Convert the result to a response
+        match result {
+            Ok(value) => match serde_json::to_value(value) {
+                Ok(val) => val,
+                Err(_) => json!({"error": "Failed to serialize result"})
+            },
+            Err(e) => json!({"error": e}),
+        }
+    }
+}
+
+/// Helper function to create a simple parameter schema for a string
+pub fn string_param(description: &str) -> Value {
+    json!({
+        "type": "string",
+        "description": description
+    })
+}
+
+/// Helper function to create a simple parameter schema for a number
+pub fn number_param(description: &str) -> Value {
+    json!({
+        "type": "number",
+        "description": description
+    })
+}
+
+/// Helper function to create a simple parameter schema for a boolean
+pub fn boolean_param(description: &str) -> Value {
+    json!({
+        "type": "boolean",
+        "description": description
+    })
+}
+
+/// Helper function to create a simple parameter schema for an object
+pub fn object_param(description: &str, properties: HashMap<&str, Value>) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "properties": properties
+    })
+}
+```
+
+### ./src/mcp/models.rs
+
+```rust
+/// Constants for common Anthropic model names
+pub struct Models;
+
+impl Models {
+    /// Claude 3 Opus - Most powerful model for complex tasks
+    pub const CLAUDE_3_OPUS: &'static str = "claude-3-opus-20240229";
+    
+    /// Claude 3 Sonnet - Balance of intelligence and speed
+    pub const CLAUDE_3_SONNET: &'static str = "claude-3-sonnet-20240229";
+    
+    /// Claude 3 Haiku - Fastest model for simple tasks
+    pub const CLAUDE_3_HAIKU: &'static str = "claude-3-haiku-20240307";
+}
+```
+
+### ./src/mcp/README.md
+
+```
+# MCP Integration for RPocketFlow
+
+This module provides integration with Anthropic's Model Context Protocol (MCP) for the RPocketFlow library. It allows you to create workflows that interact with Claude models, supporting both simple text interactions and complex tool-based exchanges.
+
+## Features
+
+- Communication with Claude models via Anthropic API
+- Support for conversation history management
+- Tool integration with function calling capabilities
+- Seamless integration with RPocketFlow's node-based architecture
+
+## Setup
+
+First, add the necessary dependencies to your `Cargo.toml`:
+
+```toml
+[dependencies]
+rpocketflow = "0.1.0"
+anthropic = "0.0.8"
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["full"] }
+```
+
+Make sure you have an Anthropic API key available.
+
+## Usage
+
+### Basic MCP Node
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+use std::collections::HashMap;
+use std::env;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Get API key from environment
+    let api_key = env::var("ANTHROPIC_API_KEY")
+        .expect("ANTHROPIC_API_KEY environment variable must be set");
+    
+    // Initialize MCP config
+    let mcp_config = McpConfig::new(api_key, Models::CLAUDE_3_SONNET)
+        .with_system_prompt("You are a helpful assistant.")
+        .with_max_tokens(1000);
+    
+    // Create MCP node
+    let mcp_node = mcp_node("ClaudeNode", mcp_config);
+    
+    // Create and run a flow
+    let flow = async_flow! {
+        name: "SimpleClaudeFlow",
+        nodes: [mcp_node]
+    };
+    
+    // Initialize shared state with user input
+    let mut shared = HashMap::new();
+    shared.insert("mcp_input".to_string(), json!("What is the capital of France?"));
+    
+    // Run the flow
+    let result = flow.orchestrate(&mut shared, None).await?;
+    
+    // Print the response
+    if let Some(output) = shared.get("mcp_output") {
+        println!("Claude's response: {}", output);
+    }
+    
+    Ok(())
+}
+```
+
+### Adding Tools
+
+```rust
+use rpocketflow::*;
+use rpocketflow::mcp::tools::{string_param, Tool, ToolRegistry};
+use serde_json::json;
+
+// Create a tool registry
+let mut registry = ToolRegistry::new();
+
+// Create and register a simple calculator tool
+let calculator_tool = Tool::new(
+    "calculate",
+    "Perform a mathematical calculation",
+    json!({
+        "type": "object",
+        "properties": {
+            "expression": string_param("The mathematical expression to evaluate")
+        },
+        "required": ["expression"]
+    })
+).with_handler(|args| {
+    let expression = args.get("expression")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // This is a very simplified example - in a real app you would use a proper expression evaluator
+    let result = 42; // Placeholder for actual calculation
+    Ok(json!({ "result": result }))
+});
+
+registry.register(calculator_tool);
+
+// Now you can use these tools with your MCP node
+// ...
+```
+
+## Advanced Usage
+
+For more complex scenarios, refer to the `examples/mcp_example.rs` file which demonstrates:
+
+- A multi-node workflow with user input and output nodes
+- Tool integration with a weather API example
+- Conversation state management
+- Flow control based on user responses
+
+## MCP Node States
+
+The MCP node manages several states in the shared state object:
+
+| Key | Description |
+|-----|-------------|
+| `mcp_input` | Input message to send to the model |
+| `mcp_output` | Text response from the model |
+| `mcp_history` | Conversation history |
+| `mcp_tools` | (Optional) Tool registry for function calling |
+
+## Error Handling
+
+MCP node errors are returned through the standard RPocketFlow error handling mechanisms. Common errors include API authentication issues, rate limiting, and malformed requests.
+```
+
+### ./src/mcp/mod.rs
+
+```rust
+use anthropic::client::{Client, ClientBuilder};
+use anthropic::types::{Message, MessagesRequest, Role, ContentBlock};
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use log::{debug, error};
+
+use crate::async_node::AsyncNode;
+use crate::sync::{Node, NodeRef, NodeResult, Params, Shared, BaseNode, SyncNode};
+
+pub mod models;
+pub mod tools;
+pub mod macros;
+#[cfg(test)]
+pub mod tests;
+
+/// MCP client configuration for communicating with Anthropic's API
+#[derive(Clone)]
+pub struct McpConfig {
+    /// Anthropic API key
+    pub api_key: String,
+    /// Model to use (e.g., "claude-3-opus-20240229")
+    pub model: String,
+    /// System prompt to use for the model
+    pub system_prompt: Option<String>,
+    /// Maximum tokens to generate in the response
+    pub max_tokens: Option<u32>,
+    /// Temperature for generation (0.0-1.0)
+    pub temperature: Option<f32>,
+}
+
+impl McpConfig {
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        McpConfig {
+            api_key: api_key.into(),
+            model: model.into(),
+            system_prompt: None,
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+}
+
+/// Base MCP node that provides common functionality for interacting with MCP
+pub struct McpNode {
+    base: BaseNode,
+    config: McpConfig,
+    client: Client,
+    messages: Vec<(Role, String)>,
+}
+
+impl McpNode {
+    pub fn new(name: impl Into<String>, config: McpConfig) -> Self {
+        let mut builder = ClientBuilder::default();
+        builder.api_key(config.api_key.clone());
+        
+        let client = builder.build()
+            .expect("Failed to create Anthropic client");
+        
+        McpNode {
+            base: BaseNode::new(name),
+            config,
+            client,
+            messages: Vec::new(),
+        }
+    }
+
+    /// Add a message to the conversation
+    pub fn add_message(&mut self, role: impl Into<String>, content: impl Into<String>) {
+        let role_str = role.into();
+        let role = match role_str.as_str() {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            _ => Role::User, // Default to user for unknown roles
+        };
+        
+        self.messages.push((role, content.into()));
+    }
+
+    /// Get the current conversation
+    pub fn get_messages(&self) -> &Vec<(Role, String)> {
+        &self.messages
+    }
+
+    /// Clear the conversation
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+    }
+    
+    /// Extract text from a response
+    pub fn extract_text_from_response(response: &anthropic::types::MessagesResponse) -> String {
+        response.content.iter()
+            .filter_map(|block| {
+                match block {
+                    ContentBlock::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    }
+}
+
+impl Node for McpNode {
+    fn get_params(&self) -> &Params {
+        &self.base.params
+    }
+
+    fn set_params(&mut self, params: Params) {
+        self.base.params = params;
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        &self.base.successors
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        &mut self.base.successors
+    }
+
+    fn get_name(&self) -> &str {
+        &self.base.name
+    }
+}
+
+impl SyncNode for McpNode {}
+
+#[async_trait]
+impl AsyncNode for McpNode {
+    async fn exec_async(&mut self, _prep_res: &Value) -> NodeResult<Value> {
+        // Create message objects from stored messages
+        let mut api_messages = Vec::new();
+        for (role, content) in &self.messages {
+            api_messages.push(Message {
+                role: *role,
+                content: vec![ContentBlock::Text { 
+                    text: content.clone(),
+                }],
+            });
+        }
+        
+        // Get the system prompt (use empty string if none provided)
+        let system = self.config.system_prompt.clone().unwrap_or_else(|| "".to_string());
+        
+        // Create the request with all required fields
+        let request = MessagesRequest {
+            messages: api_messages,
+            system: system,
+            model: self.config.model.clone(),
+            max_tokens: self.config.max_tokens.map(|t| t as usize).unwrap_or(1024),
+            stop_sequences: Vec::new(),
+            stream: false,
+            temperature: self.config.temperature.map(|t| t as f64),
+            top_p: None,
+            top_k: None,
+        };
+        
+        // Execute the request
+        match self.client.messages(request).await {
+            Ok(response) => {
+                debug!("MCP response received");
+                let text = Self::extract_text_from_response(&response);
+                
+                // Store the assistant message in the conversation history
+                self.messages.push((Role::Assistant, text.clone()));
+                
+                Ok(json!({
+                    "text": text,
+                    "raw_message": json!(response),
+                }))
+            },
+            Err(e) => {
+                error!("Error from MCP API: {}", e);
+                Err(format!("MCP API error: {}", e))
+            }
+        }
+    }
+    
+    async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        // Check if there are any input messages in the shared state
+        if let Some(input) = shared.get("mcp_input") {
+            if let Some(input_str) = input.as_str() {
+                // Add user message to the conversation
+                self.add_message("user", input_str);
+            }
+        }
+        
+        // Check if there's conversation history to load
+        if let Some(history) = shared.get("mcp_history") {
+            if let Some(history_array) = history.as_array() {
+                for msg in history_array {
+                    let role = msg.get("role")
+                        .ok_or_else(|| "Missing 'role' in history message".to_string())?
+                        .as_str()
+                        .ok_or_else(|| "Role must be a string".to_string())?;
+                    
+                    let content = msg.get("content")
+                        .ok_or_else(|| "Missing 'content' in history message".to_string())?
+                        .as_str()
+                        .ok_or_else(|| "Content must be a string".to_string())?;
+                    
+                    self.add_message(role, content);
+                }
+            }
+        }
+        
+        Ok(json!({"prepared": true}))
+    }
+    
+    async fn post_async(&mut self, shared: &mut Shared, _prep_res: &Value, exec_res: &Value) -> NodeResult<Value> {
+        // Store the response in the shared state
+        if let Some(text) = exec_res.get("text") {
+            shared.insert("mcp_output".to_string(), text.clone());
+        }
+        
+        // Update the conversation history in the shared state
+        let messages = self.get_messages().iter().map(|(role, content)| {
+            let role_str = match role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            
+            json!({
+                "role": role_str,
+                "content": content,
+            })
+        }).collect::<Vec<_>>();
+        
+        shared.insert("mcp_history".to_string(), json!(messages));
+        
+        Ok(json!("default"))
+    }
+}
+
+/// Create a new MCP node
+pub fn mcp_node(name: impl Into<String>, config: McpConfig) -> NodeRef {
+    let node = McpNode::new(name, config);
+    Arc::new(Mutex::new(node))
+}
+
+```
+
+### ./src/mcp/tests.rs
+
+```rust
+#[cfg(test)]
+mod tests {
+    use crate::*;
+    use serde_json::json;
+    use anthropic::types::Role;
+
+    // Helper to create a mock MCP config
+    fn mock_mcp_config() -> McpConfig {
+        McpConfig::new("test-api-key", Models::CLAUDE_3_HAIKU)
+            .with_system_prompt("You are a test assistant.")
+            .with_max_tokens(100)
+            .with_temperature(0.0)
+    }
+
+    #[test]
+    fn test_message_creation() {
+        let mut node = McpNode::new("TestNode", mock_mcp_config());
+        
+        // Add a user message
+        node.add_message("user", "Hello world");
+        
+        // Check that the message was added correctly
+        assert_eq!(node.messages.len(), 1);
+        assert_eq!(node.messages[0].1, "Hello world");
+        assert!(matches!(node.messages[0].0, Role::User));
+    }
+
+    #[test]
+    fn test_tool_registry() {
+        // Create a tool registry
+        let mut registry = ToolRegistry::new();
+        
+        // Add a test tool
+        let test_tool = Tool::new(
+            "test_tool",
+            "A test tool",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The query to process"}
+                },
+                "required": ["query"]
+            })
+        ).with_handler(|args| {
+            let query = args.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+                
+            Ok(json!({
+                "result": format!("Processed: {}", query)
+            }))
+        });
+        
+        registry.register(test_tool);
+        
+        // Test tool execution
+        let args = json!({"query": "test query"});
+        let result = registry.process_tool_call("test_tool", args);
+        
+        assert_eq!(result["result"], "Processed: test query");
+    }
+}
+```
+
+### ./src/mcp/macros.rs
+
+```rust
+/// Create a simple MCP node with minimal configuration requirements.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::{mcp_simple, Models};
+/// use std::env;
+///
+/// // Create a basic MCP node using Claude
+/// let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
+/// let claude = mcp_simple!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
+/// ```
+#[macro_export]
+macro_rules! mcp_simple {
+    ($name:expr, $api_key:expr, $model:expr) => {{
+        use $crate::mcp::{McpConfig, mcp_node};
+        
+        let config = McpConfig::new($api_key, $model);
+        mcp_node($name, config)
+    }};
+    
+    ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr) => {{
+        use $crate::mcp::{McpConfig, mcp_node};
+        
+        let config = McpConfig::new($api_key, $model)
+            .with_system_prompt($system_prompt);
+        mcp_node($name, config)
+    }};
+    
+    ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr, $max_tokens:expr) => {{
+        use $crate::mcp::{McpConfig, mcp_node};
+        
+        let config = McpConfig::new($api_key, $model)
+            .with_system_prompt($system_prompt)
+            .with_max_tokens($max_tokens);
+        mcp_node($name, config)
+    }};
+    
+    ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr, $max_tokens:expr, $temperature:expr) => {{
+        use $crate::mcp::{McpConfig, mcp_node};
+        
+        let config = McpConfig::new($api_key, $model)
+            .with_system_prompt($system_prompt)
+            .with_max_tokens($max_tokens)
+            .with_temperature($temperature);
+        mcp_node($name, config)
+    }};
+}
+
+/// Create a tool for MCP function calling with simpler syntax than manually creating
+/// Tool objects. Supports only string parameters for simplicity.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::mcp_tool;
+/// use serde_json::json;
+///
+/// // Create a weather tool
+/// let weather_tool = mcp_tool!("get_weather", "Get the weather for a location", [
+///     ("location", "The city and country to get weather for")
+/// ], |args| {
+///     let location = args["location"].as_str().unwrap_or("unknown");
+///     Ok(json!({
+///         "temperature": 72,
+///         "condition": "sunny",
+///         "location": location
+///     }))
+/// });
+/// ```
+#[macro_export]
+macro_rules! mcp_tool {
+    ($name:expr, $description:expr, [
+        $(($param_name:expr, $param_desc:expr)),+ $(,)?
+    ], $handler:expr) => {{
+        use $crate::mcp::tools::{Tool, string_param};
+        use serde_json::json;
+        
+        let parameters = json!({
+            "type": "object",
+            "properties": {
+                $( $param_name: string_param($param_desc), )+
+            },
+            "required": [ $( $param_name, )+ ]
+        });
+        
+        Tool::new($name, $description, parameters)
+            .with_handler($handler)
+    }};
+}
+
+/// Create a complete MCP conversation flow with input and output handling in one macro.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::{mcp_flow, Models};
+/// use std::env;
+///
+/// // Create an MCP conversation flow
+/// let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
+/// let flow = mcp_flow!("ConversationFlow", api_key, Models::CLAUDE_3_SONNET,
+///     system: "You are a helpful assistant that provides concise answers."
+/// );
+/// ```
+#[macro_export]
+macro_rules! mcp_flow {
+    ($name:expr, $api_key:expr, $model:expr, 
+     system: $system:expr
+     $(, max_tokens: $max_tokens:expr)?
+     $(, temperature: $temp:expr)?
+    ) => {{
+        use $crate::{async_flow, create_node, mcp_simple};
+        use serde_json::json;
+        
+        // Create input node
+        let input_node = create_node!("InputNode", 
+            exec: |_| {
+                Ok(json!("continue"))
+            }
+        );
+        
+        // Create MCP node
+        let mcp_node = mcp_simple!("McpNode", $api_key, $model, $system
+            $(, $max_tokens)?
+            $(, $temp)?
+        );
+        
+        // Create output node
+        let output_node = create_node!("OutputNode", 
+            exec: |_| {
+                Ok(json!("done"))
+            }
+        );
+        
+        // Connect nodes in a flow
+        async_flow!($name, input_node, mcp_node, output_node)
+    }};
+}
+
+/// Register multiple tools for MCP function calling with a simple syntax.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::{register_tools, mcp_tool};
+/// use serde_json::json;
+///
+/// // Create a tool registry with multiple tools
+/// let registry = register_tools! {
+///     mcp_tool!("get_weather", "Get weather information", [
+///         ("location", "City name")
+///     ], |args| {
+///         let location = args["location"].as_str().unwrap_or("unknown");
+///         Ok(json!({"temp": 72, "condition": "sunny"}))
+///     }),
+///     
+///     mcp_tool!("calculate", "Perform basic math", [
+///         ("expression", "Mathematical expression to evaluate")
+///     ], |args| {
+///         let expr = args["expression"].as_str().unwrap_or("0");
+///         // In real code, you'd evaluate the expression
+///         Ok(json!({"result": 42}))
+///     })
+/// };
+/// ```
+#[macro_export]
+macro_rules! register_tools {
+    ($($tool:expr),+ $(,)?) => {{
+        use $crate::mcp::tools::ToolRegistry;
+        
+        let mut registry = ToolRegistry::new();
+        $(
+            registry.register($tool);
+        )+
+        
+        registry
+    }};
+}
+
+
+```
+
+### ./src/macros.rs
+
+```rust
+/// Macro to simplify creating a new node with minimal boilerplate
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::node_impl;
+/// use serde_json::Value;
+///
+/// // Create a simple node
+/// let my_node = node_impl! {
+///     name: "MyNode",
+///     exec: |_prep_res: &Value| {
+///         println!("Node is executing!");
+///         Ok(Value::Null)
+///     }
+/// };
+/// ```
+#[macro_export]
+macro_rules! node_impl {
+    (
+        name: $name:expr,
+        $(prep: $prep_fn:expr,)?
+        exec: $exec_fn:expr
+        $(, post: $post_fn:expr)?
+        $(, max_retries: $retries:expr)?
+        $(, wait_duration: $wait:expr)?
+        $(,)?
+    ) => {{
+        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
+        use serde_json::Value;
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        struct GeneratedNode {
+            base: BaseNode,
+        }
+
+        impl GeneratedNode {
+            fn new(name: impl Into<String>) -> Self {
+                let base = BaseNode::new(name);
+                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
+                Self { base }
+            }
+        }
+
+        impl Node for GeneratedNode {
+            fn get_params(&self) -> &Params { &self.base.get_params() }
+            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
+            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
+                self.base.add_successor(action, successor);
+            }
+            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors()
+            }
+            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors_mut()
+            }
+            fn get_name(&self) -> &str { self.base.get_name() }
+            fn get_max_retries(&self) -> usize { self.base.get_max_retries() }
+            fn get_wait_duration(&self) -> Duration { self.base.get_wait_duration() }
+        }
+
+        impl SyncNode for GeneratedNode {
+            #[allow(unused_variables)]
+            fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+                $(let result = ($prep_fn)(shared);
+                return result;)?
+                Ok(Value::Null)
+            }
+
+            fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
+                ($exec_fn)(prep_res)
+            }
+
+            #[allow(unused_variables)]
+            fn post(&mut self, shared: &mut Shared, prep_res: &Value, exec_res: &Value) -> NodeResult<Value> {
+                $(let result = ($post_fn)(shared, prep_res, exec_res);
+                return result;)?
+                Ok(Value::Null)
+            }
+        }
+
+        $crate::sync::node(GeneratedNode::new($name))
+    }}
+}
+
+/// Macro to create a simple flow with connected nodes
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::flow;
+/// use rpocketflow::node_impl;
+/// use serde_json::Value;
+/// 
+/// // First, create some nodes to use in our flow
+/// let node1 = node_impl! { name: "Node1", exec: |_: &Value| Ok(Value::Null) };
+/// let node2 = node_impl! { name: "Node2", exec: |_: &Value| Ok(Value::Null) };
+/// let node3 = node_impl! { name: "Node3", exec: |_: &Value| Ok(Value::Null) };
+///
+/// // Create a linear flow
+/// let flow = flow! {
+///     name: "SimpleFlow",
+///     nodes: [node1, node2, node3]
+/// };
+/// ```
+///
+/// ```rust
+/// use rpocketflow::flow;
+/// use rpocketflow::node_impl;
+/// use serde_json::Value;
+/// 
+/// // First, create some nodes
+/// let start_node = node_impl! { name: "Start", exec: |_: &Value| Ok(Value::Null) };
+/// let path1_node = node_impl! { name: "Path1", exec: |_: &Value| Ok(Value::Null) };
+/// let path2_node = node_impl! { name: "Path2", exec: |_: &Value| Ok(Value::Null) };
+/// let end_node = node_impl! { name: "End", exec: |_: &Value| Ok(Value::Null) };
+///
+/// // Create a more complex flow with branches
+/// let flow = flow! {
+///     name: "BranchingFlow",
+///     start: start_node.clone(),
+///     connections: [
+///         (start_node.clone(), "path1", path1_node.clone()),
+///         (start_node.clone(), "path2", path2_node.clone()),
+///         (path1_node.clone(), "default", end_node.clone()),
+///         (path2_node.clone(), "default", end_node.clone())
+///     ]
+/// };
+/// ```
+#[macro_export]
+macro_rules! flow {
+    // Simple linear flow
+    (
+        name: $name:expr,
+        nodes: [$first:expr $(, $rest:expr)+]
+    ) => {{
+        use $crate::sync::{Flow, then};
+
+        let first_node = $first;
+        $(
+            let _ = then(&first_node, $rest);
+        )*
+
+        Flow::new($name, first_node)
+    }};
+
+    // Flow with explicit connections
+    (
+        name: $name:expr,
+        start: $start:expr,
+        connections: [$(($from:expr, $action:expr, $to:expr)),+ $(,)?]
+    ) => {{
+        use $crate::sync::{Flow, when};
+
+        let start_node = $start;
+        $(
+            let _ = when(&$from, $action).then($to);
+        )+
+
+        Flow::new($name, start_node)
+    }};
+}
+
+/// Macro to create a simple decision node
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::decision_node;
+/// use rpocketflow::{Params, Shared};
+/// use serde_json::Value;
+/// use std::collections::HashMap;
+///
+/// // Create a decision node based on a condition
+/// let decision_node = decision_node! {
+///     name: "RouteDecision",
+///     condition: |params: &Params, shared: &Shared| {
+///         if let Some(Value::Number(age)) = shared.get("age") {
+///             if age.as_u64().unwrap_or(0) >= 18 {
+///                 "adult".to_string()
+///             } else {
+///                 "minor".to_string()
+///             }
+///         } else {
+///             "unknown".to_string()
+///         }
+///     }
+/// };
+/// ```
+#[macro_export]
+macro_rules! decision_node {
+    (
+        name: $name:expr,
+        condition: $condition:expr
+        $(, max_retries: $retries:expr)?
+        $(, wait_duration: $wait:expr)?
+        $(,)?
+    ) => {{
+        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
+        use serde_json::Value;
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        struct DecisionNode {
+            base: BaseNode,
+            condition: Box<dyn Fn(&Params, &Shared) -> String + Send>,
+        }
+
+        impl DecisionNode {
+            fn new(
+                name: impl Into<String>,
+                condition: impl Fn(&Params, &Shared) -> String + Send + 'static
+            ) -> Self {
+                let base = BaseNode::new(name);
+                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
+                Self {
+                    base,
+                    condition: Box::new(condition),
+                }
+            }
+        }
+
+        impl Node for DecisionNode {
+            fn get_params(&self) -> &Params { &self.base.get_params() }
+            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
+            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
+                self.base.add_successor(action, successor);
+            }
+            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors()
+            }
+            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors_mut()
+            }
+            fn get_name(&self) -> &str { self.base.get_name() }
+            fn get_max_retries(&self) -> usize { self.base.get_max_retries() }
+            fn get_wait_duration(&self) -> Duration { self.base.get_wait_duration() }
+        }
+
+        impl SyncNode for DecisionNode {
+            fn post(&mut self, shared: &mut Shared, _prep_res: &Value, _exec_res: &Value) -> NodeResult<Value> {
+                // Use the condition to determine the next action
+                let decision = (self.condition)(self.get_params(), shared);
+                Ok(Value::String(decision))
+            }
+        }
+
+        $crate::sync::node(DecisionNode::new($name, $condition))
+    }}
+}
+
+/// Macro for creating a simple processing chain
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::processing_chain;
+/// use rpocketflow::NodeResult;
+/// use serde_json::Value;
+/// 
+/// // Create a chain of processing steps
+/// let processor = processing_chain! {
+///     name: "DataProcessor",
+///     steps: [
+///         |data: &Value| -> NodeResult<Value> { /* transformation 1 */ Ok(data.clone()) },
+///         |data: &Value| -> NodeResult<Value> { /* transformation 2 */ Ok(data.clone()) },
+///         |data: &Value| -> NodeResult<Value> { /* transformation 3 */ Ok(data.clone()) }
+///     ]
+/// };
+/// ```
+#[macro_export]
+macro_rules! processing_chain {
+    (
+        name: $name:expr,
+        steps: [$($step:expr),+ $(,)?]
+        $(, max_retries: $retries:expr)?
+        $(, wait_duration: $wait:expr)?
+        $(,)?
+    ) => {{
+        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
+        use serde_json::Value;
+        use std::collections::HashMap;
+        use std::time::Duration;
+
+        struct ProcessingChain {
+            base: BaseNode,
+            steps: Vec<Box<dyn Fn(&Value) -> NodeResult<Value> + Send>>,
+        }
+
+        impl ProcessingChain {
+            fn new(name: impl Into<String>) -> Self {
+                let base = BaseNode::new(name);
+                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
+                Self {
+                    base,
+                    steps: Vec::new()
+                }
+            }
+
+            fn add_step(&mut self, step: impl Fn(&Value) -> NodeResult<Value> + Send + 'static) {
+                self.steps.push(Box::new(step));
+            }
+        }
+
+        impl Node for ProcessingChain {
+            fn get_params(&self) -> &Params { &self.base.get_params() }
+            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
+            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
+                self.base.add_successor(action, successor);
+            }
+            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors()
+            }
+            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
+                self.base.get_successors_mut()
+            }
+            fn get_name(&self) -> &str { self.base.get_name() }
+            fn get_max_retries(&self) -> usize { self.base.get_max_retries() }
+            fn get_wait_duration(&self) -> Duration { self.base.get_wait_duration() }
+        }
+
+        impl SyncNode for ProcessingChain {
+            fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+                // Get input data from shared state
+                if let Some(input) = shared.get("input") {
+                    Ok(input.clone())
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+
+            fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
+                let mut current = prep_res.clone();
+
+                for step in &self.steps {
+                    current = step(&current)?;
+                }
+
+                Ok(current)
+            }
+        }
+
+        let mut chain = ProcessingChain::new($name);
+        $(
+            chain.add_step($step);
+        )+
+
+        $crate::sync::node(chain)
+    }}
+}
+
+```
+
+### ./src/sync/flow.rs
+
+```rust
+#![allow(unused)]
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::MutexGuard;
+use std::time::Duration;
+
+use super::action::Action;
+use super::base_node::BaseNode;
+use super::node::Node;
+use super::sync_node::SyncNode;
+use super::types::{NodeRef, NodeResult, Params, Shared};
+
+/// A flow that orchestrates a sequence of nodes
+pub struct Flow {
+    pub base: BaseNode,
+    pub start: NodeRef,
+}
+
+impl Flow {
+    /// Create a new flow with a starting node
+    pub fn new(name: impl Into<String>, start: NodeRef) -> Self {
+        Flow {
+            base: BaseNode::new(name),
+            start,
+        }
+    }
+
+    /// Get the next node based on the action from the current node
+    pub fn get_next_node(node_guard: &mut dyn SyncNode, action: &Action) -> Option<NodeRef> {
+        // Convert Action to string
+        let action_str = action.to_string();
+
+        // First try the specific action
+        if let Some(next) = node_guard.get_successors().get(&action_str) {
+            return Some(next.clone());
+        }
+
+        // Then try the default action if not already trying default
+        if action != &Action::Default {
+            if let Some(next) = node_guard.get_successors().get("default") {
+                return Some(next.clone());
+            }
+        }
+
+        // No successor found
+        if !node_guard.get_successors().is_empty() {
+            println!(
+                "Flow ends: action '{}' not found in node '{}'. Available actions: {:?}",
+                action,
+                node_guard.get_name(),
+                node_guard.get_successors().keys().collect::<Vec<_>>()
+            );
+        }
+
+        None
+    }
+
+    /// Orchestrate the flow execution
+    pub fn orchestrate(
+        &self,
+        shared: &mut Shared,
+        params_override: Option<Params>,
+    ) -> NodeResult<()> {
+        let p = params_override.unwrap_or_else(|| self.base.params.clone());
+        let mut curr = self.start.clone();
+
+        loop {
+            let action = {
+                let mut node = match curr.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        println!("Mutex was poisoned. Recovering and continuing.");
+                        poisoned.into_inner()
+                    }
+                };
+
+                node.set_params(p.clone());
+
+                match node._run(shared) {
+                    Ok(action) => {
+                        if action == Action::Terminate {
+                            println!(
+                                "Flow '{}' terminated by node '{}'",
+                                self.base.name,
+                                node.get_name()
+                            );
+                            return Ok(());
+                        }
+
+                        // Get the next node before dropping the lock
+                        let next_node_option = Self::get_next_node(&mut *node, &action);
+
+                        // Release the lock before moving to the next node
+                        drop(node);
+
+                        if let Some(next_node) = next_node_option {
+                            curr = next_node;
+                            continue;
+                        } else {
+                            // No successor found, end the flow
+                            println!("Flow '{}' ended naturally", self.base.name);
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error in Flow '{}' execution: {}", self.base.name, e);
+                        return Err(format!("Flow error: {}", e));
+                    }
+                }
+            };
+        }
+    }
+}
+
+impl Node for Flow {
+    fn set_params(&mut self, params: Params) {
+        self.base.set_params(params);
+    }
+
+    fn get_params(&self) -> &Params {
+        self.base.get_params()
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        self.base.get_successors()
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        self.base.get_successors_mut()
+    }
+
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.base.get_max_retries()
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.base.get_wait_duration()
+    }
+}
+
+impl SyncNode for Flow {
+    fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        self.base.prep(shared)
+    }
+
+    fn exec(&mut self, _prep_res: &Value) -> NodeResult<Value> {
+        Err("Flow doesn't support direct execution".to_string())
+    }
+
+    fn post(
+        &mut self,
+        shared: &mut Shared,
+        prep_res: &Value,
+        _exec_res: &Value,
+    ) -> NodeResult<Value> {
+        self.base.post(shared, prep_res, &Value::Null)
+    }
+
+    fn _run(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        let prep_res = self.prep(shared)?;
+        self.orchestrate(shared, None)?;
+        let post_result = self.post(shared, &prep_res, &Value::Null)?;
+        Ok(Action::from(&post_result))
+    }
+}
+
+```
+
+### ./src/sync/action.rs
+
+```rust
+use serde_json::Value;
+use std::fmt;
+use std::hash::{Hash, Hasher};
+
+/// Enum representing possible actions a node can take
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Default action for linear flows
+    Default,
+    /// Named action for branching flows
+    Named(String),
+    /// Terminate the flow
+    Terminate,
+}
+
+impl Action {
+    /// Creates a new Action from a string
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "default" => Action::Default,
+            "terminate" => Action::Terminate,
+            _ => Action::Named(s.to_string()),
+        }
+    }
+}
+
+impl From<&Value> for Action {
+    fn from(value: &Value) -> Self {
+        if value.is_null() {
+            return Action::Default;
+        }
+
+        if let Some(s) = value.as_str() {
+            Action::from_str(s)
+        } else {
+            Action::Default
+        }
+    }
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Action::Default => write!(f, "default"),
+            Action::Named(name) => write!(f, "{}", name),
+            Action::Terminate => write!(f, "terminate"),
+        }
+    }
+}
+
+impl PartialEq for Action {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Action::Default, Action::Default) => true,
+            (Action::Terminate, Action::Terminate) => true,
+            (Action::Named(a), Action::Named(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Action {}
+
+impl Hash for Action {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Action::Default => {
+                0.hash(state);
+                "default".hash(state);
+            }
+            Action::Terminate => {
+                1.hash(state);
+                "terminate".hash(state);
+            }
+            Action::Named(name) => {
+                2.hash(state);
+                name.hash(state);
+            }
+        }
+    }
+}
+
+```
+
+### ./src/sync/types.rs
+
+```rust
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use super::sync_node::SyncNode;
+
+/// Type alias for node parameters
+pub type Params = HashMap<String, Value>;
+
+/// Type alias for shared state between nodes
+pub type Shared = HashMap<String, Value>;
+
+/// Type alias for a node reference
+pub type NodeRef = Arc<Mutex<dyn SyncNode + Send>>;
+
+/// Type alias for results from node operations
+pub type NodeResult<T> = Result<T, String>;
+
+```
+
+### ./src/sync/helpers.rs
+
+```rust
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use super::sync_node::SyncNode;
+use super::types::NodeRef;
+
+/// Create a NodeRef from a SyncNode implementation
+pub fn node<T: SyncNode + 'static>(node: T) -> NodeRef {
+    Arc::new(Mutex::new(node))
+}
+
+/// Helper function to chain nodes using the default action
+pub fn then(from: &NodeRef, to: NodeRef) -> NodeRef {
+    from.lock()
+        .unwrap()
+        .add_successor("default".to_string(), to.clone());
+    to
+}
+
+/// Struct and helper for adding a conditional transition
+pub struct ConditionalTransition {
+    pub src: NodeRef,
+    pub action: String,
+}
+
+impl ConditionalTransition {
+    /// Chain the transition to a target node
+    pub fn then(self, tgt: NodeRef) -> NodeRef {
+        self.src
+            .lock()
+            .unwrap()
+            .add_successor(self.action, tgt.clone());
+        tgt
+    }
+}
+
+/// Helper function to create a conditional transition
+pub fn when(node: &NodeRef, action: impl Into<String>) -> ConditionalTransition {
+    ConditionalTransition {
+        src: node.clone(),
+        action: action.into(),
+    }
+}
+
+```
+
+### ./src/sync/mod.rs
+
+```rust
+mod action;
+mod base_node;
+mod flow;
+mod helpers;
+mod node;
+mod sync_node;
+mod types;
+
+// Re-export the public API
+pub use action::Action;
+pub use base_node::BaseNode;
+pub use flow::Flow;
+pub use helpers::{node, then, when, ConditionalTransition};
+pub use node::Node;
+pub use sync_node::SyncNode;
+pub use types::{NodeRef, NodeResult, Params, Shared};
+
+// Internal use only
+#[cfg(test)]
+mod tests;
+
+```
+
+### ./src/sync/node.rs
+
+```rust
+use std::collections::HashMap;
+use std::time::Duration;
+
+// Removing unused import
+use super::types::{NodeRef, Params};
+
+/// Base trait for all nodes in the system
+pub trait Node: Send {
+    /// Get the node's parameters
+    fn get_params(&self) -> &Params;
+
+    /// Set the node's parameters
+    fn set_params(&mut self, params: Params);
+
+    /// Get the node's successors
+    fn get_successors(&self) -> &HashMap<String, NodeRef>;
+
+    /// Get mutable access to the node's successors
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef>;
+
+    /// Add a successor for a specific action
+    fn add_successor(&mut self, action: String, successor: NodeRef);
+
+    /// Get the node's name (for debugging and logging)
+    fn get_name(&self) -> &str;
+
+    /// Get the maximum number of retry attempts
+    fn get_max_retries(&self) -> usize {
+        1 // Default is 1 attempt (no retries)
+    }
+
+    /// Get the wait duration between retry attempts
+    fn get_wait_duration(&self) -> Duration {
+        Duration::from_millis(0) // Default is no wait
+    }
+}
+
+```
+
+### ./src/sync/tests.rs
+
+```rust
+use serde_json::Value;
+use std::collections::HashMap;
+use std::time::Duration;
+
+use super::action::Action;
+use super::base_node::BaseNode;
+use super::flow::Flow;
+use super::helpers::{node, then, when};
+use super::node::Node;
+use super::sync_node::SyncNode;
+use super::types::{NodeRef, NodeResult, Params, Shared};
+
+// A test node that adds a value to shared state
+struct AddToShared {
+    base: BaseNode,
+    key: String,
+    value: Value,
+}
+
+impl AddToShared {
+    fn new(name: impl Into<String>, key: impl Into<String>, value: Value) -> Self {
+        AddToShared {
+            base: BaseNode::new(name),
+            key: key.into(),
+            value,
+        }
+    }
+}
+
+impl Node for AddToShared {
+    fn get_params(&self) -> &Params {
+        self.base.get_params()
+    }
+
+    fn set_params(&mut self, params: Params) {
+        self.base.set_params(params);
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        self.base.get_successors()
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        self.base.get_successors_mut()
+    }
+
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.base.get_max_retries()
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.base.get_wait_duration()
+    }
+}
+
+impl SyncNode for AddToShared {
+    fn post(
+        &mut self,
+        shared: &mut Shared,
+        _prep_res: &Value,
+        _exec_res: &Value,
+    ) -> NodeResult<Value> {
+        shared.insert(self.key.clone(), self.value.clone());
+        Ok(Value::Null)
+    }
+}
+
+// A test node that returns a specific action
+struct ActionNode {
+    base: BaseNode,
+    return_action: String,
+}
+
+impl ActionNode {
+    fn new(name: impl Into<String>, return_action: impl Into<String>) -> Self {
+        ActionNode {
+            base: BaseNode::new(name),
+            return_action: return_action.into(),
+        }
+    }
+}
+
+impl Node for ActionNode {
+    fn get_params(&self) -> &Params {
+        self.base.get_params()
+    }
+
+    fn set_params(&mut self, params: Params) {
+        self.base.set_params(params);
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        self.base.get_successors()
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        self.base.get_successors_mut()
+    }
+
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.base.get_max_retries()
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.base.get_wait_duration()
+    }
+}
+
+impl SyncNode for ActionNode {
+    fn post(
+        &mut self,
+        _shared: &mut Shared,
+        _prep_res: &Value,
+        _exec_res: &Value,
+    ) -> NodeResult<Value> {
+        Ok(Value::String(self.return_action.clone()))
+    }
+}
+
+#[test]
+fn test_basic_flow() {
+    let node1 = node(AddToShared::new(
+        "Node1",
+        "key1",
+        Value::String("value1".to_string()),
+    ));
+    let node2 = node(AddToShared::new(
+        "Node2",
+        "key2",
+        Value::String("value2".to_string()),
+    ));
+    let node3 = node(AddToShared::new(
+        "Node3",
+        "key3",
+        Value::String("value3".to_string()),
+    ));
+
+    then(&node1, node2.clone());
+    then(&node2, node3.clone());
+
+    let flow = Flow::new("TestFlow", node1);
+    let mut shared = HashMap::new();
+
+    let result = flow.orchestrate(&mut shared, None);
+    assert!(result.is_ok());
+
+    assert_eq!(shared.len(), 3);
+    assert_eq!(
+        shared.get("key1").unwrap(),
+        &Value::String("value1".to_string())
+    );
+    assert_eq!(
+        shared.get("key2").unwrap(),
+        &Value::String("value2".to_string())
+    );
+    assert_eq!(
+        shared.get("key3").unwrap(),
+        &Value::String("value3".to_string())
+    );
+}
+
+#[test]
+fn test_branching_flow() {
+    let start = node(ActionNode::new("Start", "branch1"));
+    let branch1 = node(AddToShared::new(
+        "Branch1",
+        "path",
+        Value::String("branch1".to_string()),
+    ));
+    let branch2 = node(AddToShared::new(
+        "Branch2",
+        "path",
+        Value::String("branch2".to_string()),
+    ));
+
+    when(&start, "branch1").then(branch1.clone());
+    when(&start, "branch2").then(branch2.clone());
+
+    let flow = Flow::new("BranchingFlow", start);
+    let mut shared = HashMap::new();
+
+    let result = flow.orchestrate(&mut shared, None);
+    assert!(result.is_ok());
+
+    assert_eq!(shared.len(), 1);
+    assert_eq!(
+        shared.get("path").unwrap(),
+        &Value::String("branch1".to_string())
+    );
+}
+
+#[test]
+fn test_termination() {
+    let node1 = node(AddToShared::new(
+        "Node1",
+        "key1",
+        Value::String("value1".to_string()),
+    ));
+    let node2 = node(ActionNode::new("Node2", "terminate"));
+    let node3 = node(AddToShared::new(
+        "Node3",
+        "key3",
+        Value::String("value3".to_string()),
+    ));
+
+    then(&node1, node2.clone());
+    then(&node2, node3.clone());
+
+    let flow = Flow::new("TerminationFlow", node1);
+    let mut shared = HashMap::new();
+
+    let result = flow.orchestrate(&mut shared, None);
+    assert!(result.is_ok());
+
+    assert_eq!(shared.len(), 1);
+    assert_eq!(
+        shared.get("key1").unwrap(),
+        &Value::String("value1".to_string())
+    );
+    assert!(!shared.contains_key("key3"));
+}
+
+```
+
+### ./src/sync/sync_node.rs
+
+```rust
+use serde_json::Value;
+use std::thread;
+
+use super::action::Action;
+use super::node::Node;
+use super::types::{NodeResult, Shared};
+
+/// Trait for synchronous nodes
+pub trait SyncNode: Node {
+    /// Preparation phase - fetches necessary data before execution
+    fn prep(&mut self, _shared: &mut Shared) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    /// Execution phase - performs the node's main functionality
+    fn exec(&mut self, _prep_res: &Value) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    /// Post-processing phase - processes results and updates shared state
+    fn post(
+        &mut self,
+        _shared: &mut Shared,
+        _prep_res: &Value,
+        _exec_res: &Value,
+    ) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    /// Fallback execution when retries are exhausted
+    fn exec_fallback(&mut self, _prep_res: &Value, err: String) -> NodeResult<Value> {
+        Err(err)
+    }
+
+    /// Internal execution method with retry logic
+    fn _exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        let max_retries = self.get_max_retries();
+
+        let mut last_error = None;
+
+        for attempt in 0..max_retries {
+            match self.exec(prep_res) {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    last_error = Some(e);
+
+                    if attempt + 1 < max_retries {
+                        let wait = self.get_wait_duration();
+                        if wait > std::time::Duration::from_secs(0) {
+                            println!(
+                                "Node '{}' execution failed, retrying in {:?} (attempt {}/{})",
+                                self.get_name(),
+                                wait,
+                                attempt + 1,
+                                max_retries
+                            );
+                            thread::sleep(wait);
+                        }
+                    }
+                }
+            }
+        }
+
+        // All retries failed, call fallback
+        let err = last_error.unwrap_or_else(|| "Unknown error".to_string());
+        self.exec_fallback(prep_res, err)
+    }
+
+    /// Internal method to run the node through all phases
+    fn _run(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        let prep_res = self.prep(shared)?;
+        let exec_res = self._exec(&prep_res)?;
+        let post_res = self.post(shared, &prep_res, &exec_res)?;
+
+        Ok(Action::from(&post_res))
+    }
+
+    /// Run the node and return the next action
+    fn run(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        self._run(shared)
+    }
+}
+
+```
+
+### ./src/sync/base_node.rs
+
+```rust
+use std::collections::HashMap;
+use std::time::Duration;
+
+use super::node::Node;
+use super::sync_node::SyncNode;
+use super::types::{NodeRef, Params};
+
+/// Base implementation of a node
+pub struct BaseNode {
+    /// Node name for debugging and logging
+    pub name: String,
+    /// Node parameters
+    pub params: Params,
+    /// Node successors mapped by action
+    pub successors: HashMap<String, NodeRef>,
+    /// Maximum number of retry attempts
+    pub max_retries: usize,
+    /// Wait duration between retry attempts
+    pub wait_duration: Duration,
+}
+
+impl BaseNode {
+    /// Create a new BaseNode with default settings
+    pub fn new(name: impl Into<String>) -> Self {
+        BaseNode {
+            name: name.into(),
+            params: HashMap::new(),
+            successors: HashMap::new(),
+            max_retries: 1,
+            wait_duration: Duration::from_millis(0),
+        }
+    }
+
+    /// Set the maximum number of retry attempts
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.max_retries = max_retries;
+        self
+    }
+
+    /// Set the wait duration between retry attempts
+    pub fn with_wait_duration(mut self, wait_duration: Duration) -> Self {
+        self.wait_duration = wait_duration;
+        self
+    }
+
+    /// Set initial parameters
+    pub fn with_params(mut self, params: Params) -> Self {
+        self.params = params;
+        self
+    }
+}
+
+impl Node for BaseNode {
+    fn get_params(&self) -> &Params {
+        &self.params
+    }
+
+    fn set_params(&mut self, params: Params) {
+        self.params = params;
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        if self.successors.contains_key(&action) {
+            println!(
+                "Warning: Node '{}': Overwriting successor for action '{}'",
+                self.name, action
+            );
+        }
+        self.successors.insert(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        &self.successors
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        &mut self.successors
+    }
+
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.max_retries
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.wait_duration
+    }
+}
+
+impl SyncNode for BaseNode {}
+
+```
+
+### ./src/macros_tests.rs
+
+```rust
+#[cfg(test)]
+mod tests {
+    use crate::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    // Helper function to create a shared state with test data
+    fn test_shared() -> Shared {
+        let mut shared = HashMap::new();
+        shared.insert("input".to_string(), json!({"value": 10}));
+        shared.insert("score".to_string(), json!(0.75));
+        shared
+    }
+
+    #[test]
+    fn test_node_impl_macro() {
+        // Test basic node creation
+        let basic_node = node_impl! {
+            name: "BasicNode",
+            exec: |_prep_res: &Value| {
+                Ok(json!("executed"))
+            }
+        };
+
+        // Test full lifecycle node creation
+        let full_node = node_impl! {
+            name: "FullNode",
+            prep: |shared: &mut Shared| {
+                shared.insert("from_prep".to_string(), json!("prepped"));
+                Ok(json!({"prep_data": true}))
+            },
+            exec: |prep_res: &Value| {
+                assert!(prep_res.as_object().unwrap().contains_key("prep_data"));
+                Ok(json!({"exec_result": true}))
+            },
+            post: |shared: &mut Shared, prep_res: &Value, exec_res: &Value| {
+                assert!(prep_res.as_object().unwrap().contains_key("prep_data"));
+                assert!(exec_res.as_object().unwrap().contains_key("exec_result"));
+                shared.insert("from_post".to_string(), json!("posted"));
+                Ok(json!("done"))
+            },
+            max_retries: 2,
+            wait_duration: Duration::from_millis(10)
+        };
+
+        // Run tests
+        let mut shared = test_shared();
+
+        // Test basic node
+        let basic_result = basic_node.lock().unwrap().run(&mut shared).unwrap();
+        assert_eq!(basic_result, Action::from_str("default"));
+
+        // Test full lifecycle node
+        let full_result = full_node.lock().unwrap().run(&mut shared).unwrap();
+
+        // Check shared state was updated correctly
+        assert_eq!(shared.get("from_prep").unwrap().as_str(), Some("prepped"));
+        assert_eq!(shared.get("from_post").unwrap().as_str(), Some("posted"));
+        assert_eq!(full_result, Action::from_str("done"));
+    }
+
+    #[test]
+    fn test_flow_macro_linear() {
+        // Create test nodes
+        let node1 = node_impl! {
+            name: "Node1",
+            exec: |_: &Value| {
+                Ok(json!("node1_executed"))
+            }
+        };
+
+        let node2 = node_impl! {
+            name: "Node2",
+            exec: |_: &Value| {
+                Ok(json!("node2_executed"))
+            }
+        };
+
+        let node3 = node_impl! {
+            name: "Node3",
+            exec: |_: &Value| {
+                Ok(json!("node3_executed"))
+            }
+        };
+
+        // Create linear flow using the macro
+        let flow = flow! {
+            name: "LinearTestFlow",
+            nodes: [node1, node2, node3]
+        };
+
+        // Execute the flow
+        let mut shared = test_shared();
+        let result = flow.orchestrate(&mut shared, None);
+
+        // Test that it completed successfully
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_flow_macro_branching() {
+        // Create a decision node
+        let decision_node = decision_node! {
+            name: "DecisionNode",
+            condition: |_, shared| {
+                if let Some(score) = shared.get("score") {
+                    if score.as_f64().unwrap_or(0.0) > 0.7 {
+                        "high".to_string()
+                    } else {
+                        "low".to_string()
+                    }
+                } else {
+                    "unknown".to_string()
+                }
+            }
+        };
+
+        // Create branch nodes
+        let high_node = node_impl! {
+            name: "HighNode",
+            exec: |_: &Value| {
+                Ok(json!("high_executed"))
+            },
+            post: |shared: &mut Shared, _: &Value, _: &Value| {
+                shared.insert("branch_taken".to_string(), json!("high"));
+                Ok(json!("default"))
+            }
+        };
+
+        let low_node = node_impl! {
+            name: "LowNode",
+            exec: |_: &Value| {
+                Ok(json!("low_executed"))
+            },
+            post: |shared: &mut Shared, _: &Value, _: &Value| {
+                shared.insert("branch_taken".to_string(), json!("low"));
+                Ok(json!("default"))
+            }
+        };
+
+        let unknown_node = node_impl! {
+            name: "UnknownNode",
+            exec: |_: &Value| {
+                Ok(json!("unknown_executed"))
+            },
+            post: |shared: &mut Shared, _: &Value, _: &Value| {
+                shared.insert("branch_taken".to_string(), json!("unknown"));
+                Ok(json!("default"))
+            }
+        };
+
+        let end_node = node_impl! {
+            name: "EndNode",
+            exec: |_: &Value| {
+                Ok(json!("end_executed"))
+            },
+            post: |shared: &mut Shared, _: &Value, _: &Value| {
+                shared.insert("flow_completed".to_string(), json!(true));
+                Ok(json!("terminate"))
+            }
+        };
+
+        // Create branching flow using the macro
+        let flow = flow! {
+            name: "BranchingTestFlow",
+            start: decision_node.clone(),
+            connections: [
+                (decision_node.clone(), "high", high_node.clone()),
+                (decision_node.clone(), "low", low_node.clone()),
+                (decision_node.clone(), "unknown", unknown_node.clone()),
+                (high_node.clone(), "default", end_node.clone()),
+                (low_node.clone(), "default", end_node.clone()),
+                (unknown_node.clone(), "default", end_node.clone())
+            ]
+        };
+
+        // Execute the flow with score > 0.7
+        let mut shared = test_shared(); // Contains a score of 0.75
+        let result = flow.orchestrate(&mut shared, None);
+
+        // Test that it completed successfully and took the high branch
+        assert!(result.is_ok());
+        assert_eq!(shared.get("branch_taken").unwrap().as_str(), Some("high"));
+        assert_eq!(shared.get("flow_completed").unwrap().as_bool(), Some(true));
+
+        // Change the score and test again
+        let mut shared = test_shared();
+        shared.insert("score".to_string(), json!(0.5)); // Lower score
+        let result = flow.orchestrate(&mut shared, None);
+
+        // Test that it took the low branch
+        assert!(result.is_ok());
+        assert_eq!(shared.get("branch_taken").unwrap().as_str(), Some("low"));
+        assert_eq!(shared.get("flow_completed").unwrap().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_decision_node_macro() {
+        // Create a decision node
+        let decision = decision_node! {
+            name: "TestDecision",
+            condition: |params, shared| {
+                // Check shared state
+                if let Some(score) = shared.get("score") {
+                    if score.as_f64().unwrap_or(0.0) > 0.7 {
+                        "high".to_string()
+                    } else if score.as_f64().unwrap_or(0.0) > 0.3 {
+                        "medium".to_string()
+                    } else {
+                        "low".to_string()
+                    }
+                } else {
+                    // Check params
+                    if let Some(fallback) = params.get("fallback") {
+                        fallback.as_str().unwrap_or("unknown").to_string()
+                    } else {
+                        "unknown".to_string()
+                    }
+                }
+            }
+        };
+
+        // Test with shared state containing score
+        let mut shared1 = test_shared(); // Contains score = 0.75
+        let result1 = decision.lock().unwrap().run(&mut shared1).unwrap();
+        assert_eq!(result1, Action::from_str("high"));
+
+        // Test with lower score
+        let mut shared2 = test_shared();
+        shared2.insert("score".to_string(), json!(0.5));
+        let result2 = decision.lock().unwrap().run(&mut shared2).unwrap();
+        assert_eq!(result2, Action::from_str("medium"));
+
+        // Test with very low score
+        let mut shared3 = test_shared();
+        shared3.insert("score".to_string(), json!(0.2));
+        let result3 = decision.lock().unwrap().run(&mut shared3).unwrap();
+        assert_eq!(result3, Action::from_str("low"));
+
+        // Test with missing score but fallback param
+        let mut shared4 = HashMap::new();
+        let mut params = HashMap::new();
+        params.insert("fallback".to_string(), json!("custom_path"));
+
+        let mut node = decision.lock().unwrap();
+        node.set_params(params);
+        let result4 = node.run(&mut shared4).unwrap();
+        assert_eq!(result4, Action::from_str("custom_path"));
+    }
+
+    #[test]
+    fn test_processing_chain_macro() {
+        // Create a processing chain with multiple steps
+        let processing_chain = processing_chain! {
+            name: "TestProcessingChain",
+            steps: [
+                // Step 1: Validate input
+                |data: &Value| {
+                    if data.is_object() {
+                        Ok(data.clone())
+                    } else {
+                        Err("Data must be an object".to_string())
+                    }
+                },
+                // Step 2: Extract value
+                |data: &Value| {
+                    if let Some(value) = data.get("value") {
+                        Ok(value.clone())
+                    } else {
+                        Err("Missing 'value' field".to_string())
+                    }
+                },
+                // Step 3: Double the value if numeric - Explicitly return an integer
+                |data: &Value| {
+                    if let Some(num) = data.as_f64() {
+                        Ok(json!((num * 2.0) as i64))
+                    } else if let Some(num) = data.as_i64() {
+                        Ok(json!(num * 2))
+                    } else {
+                        Err("Value is not numeric".to_string())
+                    }
+                }
+            ],
+            max_retries: 1
+        };
+
+        // Test with valid input
+        let mut shared = test_shared(); // Contains "input": {"value": 10}
+        let mut node = processing_chain.lock().unwrap();
+
+        // Run with valid input
+        let prep_result = node.prep(&mut shared).unwrap();
+        let exec_result = node.exec(&prep_result).unwrap();
+
+        // Check the result using a value comparison that doesn't rely on exact type
+        let expected_value = json!(20);
+        assert!(
+            (exec_result.as_i64() == Some(20)) || (exec_result.as_f64() == Some(20.0)),
+            "Expected 20, got {:?}",
+            exec_result
+        );
+
+        // Test with invalid input (missing value field)
+        let mut shared2 = HashMap::new();
+        shared2.insert("input".to_string(), json!({"wrong_field": 10}));
+
+        let prep_result2 = node.prep(&mut shared2).unwrap();
+        let exec_result2 = node.exec(&prep_result2);
+
+        // Should fail at step 2
+        assert!(exec_result2.is_err());
+        assert!(exec_result2.unwrap_err().contains("Missing 'value' field"));
+
+        // Test with non-numeric value
+        let mut shared3 = HashMap::new();
+        shared3.insert("input".to_string(), json!({"value": "not a number"}));
+
+        let prep_result3 = node.prep(&mut shared3).unwrap();
+        let exec_result3 = node.exec(&prep_result3);
+
+        // Should fail at step 3
+        assert!(exec_result3.is_err());
+        assert!(exec_result3.unwrap_err().contains("Value is not numeric"));
+    }
+}
+
+```
+
+### ./src/improved_macros.rs
+
+```rust
+/// Creates a node with a more flexible syntax that allows specifying different handlers
+/// with less verbosity than the original node_impl! macro.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::create_node;
+/// use serde_json::json;
+///
+/// // Basic node with just an exec handler
+/// let simple_node = create_node!("SimpleNode", |_| {
+///     println!("Node executed!");
+///     Ok(json!("done"))
+/// });
+///
+/// // Node with prep, exec, and post handlers
+/// let full_node = create_node!("FullNode", 
+///     prep: |shared| {
+///         shared.insert("prepared".to_string(), json!(true));
+///         Ok(json!({"data": 42}))
+///     },
+///     exec: |prep_res| {
+///         let data = prep_res["data"].as_i64().unwrap_or(0);
+///         Ok(json!(data * 2))
+///     },
+///     post: |shared, prep_res, exec_res| {
+///         shared.insert("result".to_string(), exec_res.clone());
+///         Ok(json!("next_step"))
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! create_node {
+    // Simple version with just name and exec function
+    ($name:expr, $exec_fn:expr) => {
+        $crate::node_impl! {
+            name: $name,
+            exec: $exec_fn
+        }
+    };
+    
+    // Full version with named arguments
+    ($name:expr, 
+        prep: $prep_fn:expr,
+        exec: $exec_fn:expr
+        $(, post: $post_fn:expr)?
+        $(, max_retries: $retries:expr)?
+        $(, wait_duration: $wait:expr)?
+    ) => {
+        $crate::node_impl! {
+            name: $name,
+            prep: $prep_fn,
+            exec: $exec_fn
+            $(, post: $post_fn)?
+            $(, max_retries: $retries)?
+            $(, wait_duration: $wait)?
+        }
+    };
+    
+    // Version with just exec and options
+    ($name:expr, 
+        exec: $exec_fn:expr
+        $(, max_retries: $retries:expr)?
+        $(, wait_duration: $wait:expr)?
+    ) => {
+        $crate::node_impl! {
+            name: $name,
+            exec: $exec_fn
+            $(, max_retries: $retries)?
+            $(, wait_duration: $wait)?
+        }
+    };
+}
+
+/// Creates a simple sequential flow with less verbose syntax than the original flow! macro.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::{create_node, sequential_flow};
+/// use serde_json::json;
+///
+/// // Create some nodes
+/// let node1 = create_node!("Step1", |_| Ok(json!("done")));
+/// let node2 = create_node!("Step2", |_| Ok(json!("done")));
+/// let node3 = create_node!("Step3", |_| Ok(json!("done")));
+///
+/// // Create a sequential flow
+/// let flow = sequential_flow!("MyFlow", node1, node2, node3);
+/// ```
+#[macro_export]
+macro_rules! sequential_flow {
+    ($name:expr, $first:expr, $($rest:expr),+) => {
+        $crate::flow! {
+            name: $name,
+            nodes: [$first, $($rest),+]
+        }
+    };
+}
+
+/// Creates a branching flow with less verbose syntax than the original flow! macro.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::{create_node, branching_flow};
+/// use serde_json::json;
+///
+/// // Create some nodes
+/// let start = create_node!("Start", |_| Ok(json!("path_a")));
+/// let path_a = create_node!("PathA", |_| Ok(json!("done")));
+/// let path_b = create_node!("PathB", |_| Ok(json!("done")));
+/// let end = create_node!("End", |_| Ok(json!("terminate")));
+///
+/// // Create a branching flow
+/// let flow = branching_flow!("MyFlow", start => {
+///     "path_a" => path_a => "default" => end,
+///     "path_b" => path_b => "default" => end
+/// });
+/// ```
+#[macro_export]
+macro_rules! branching_flow {
+    ($name:expr, $start:expr => {
+        $($action:expr => $node:expr => $next_action:expr => $next_node:expr),+
+        $(,)?
+    }) => {
+        $crate::flow! {
+            name: $name,
+            start: $start.clone(),
+            connections: [
+                $( ($start.clone(), $action, $node.clone()) ),+,
+                $( ($node.clone(), $next_action, $next_node.clone()) ),+
+            ]
+        }
+    };
+}
+
+/// Creates an async flow with a sequence of nodes.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::{create_node, async_flow};
+/// use serde_json::json;
+///
+/// // Create some nodes
+/// let node1 = create_node!("Step1", |_| Ok(json!("done")));
+/// let node2 = create_node!("Step2", |_| Ok(json!("done")));
+///
+/// // Create an async flow
+/// let flow = async_flow!("MyAsyncFlow", node1, node2);
+/// ```
+#[macro_export]
+macro_rules! async_flow {
+    ($name:expr, $($node:expr),+) => {{
+        let first_node = $crate::sync::node($crate::sync::BaseNode::new("__start__"));
+        let mut flow = $crate::async_node::AsyncFlow::new($name, first_node.clone());
+        
+        let mut prev = first_node.clone();
+        $(
+            $crate::sync::then(&prev, $node.clone());
+            prev = $node.clone();
+        )+
+        
+        flow
+    }};
+}
+
+/// Creates a simple decision node with improved syntax over the original decision_node! macro.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::decide;
+/// use serde_json::json;
+///
+/// // Create a decision node
+/// let router = decide!("Router", |params, shared| {
+///     if let Some(value) = shared.get("direction") {
+///         if value.as_str() == Some("left") {
+///             "left_path"
+///         } else if value.as_str() == Some("right") {
+///             "right_path"
+///         } else {
+///             "default"
+///         }
+///     } else {
+///         "error_path"
+///     }
+/// });
+/// ```
+#[macro_export]
+macro_rules! decide {
+    ($name:expr, $condition:expr) => {
+        $crate::decision_node! {
+            name: $name,
+            condition: $condition
+        }
+    };
+    
+    ($name:expr, $condition:expr, max_retries: $retries:expr) => {
+        $crate::decision_node! {
+            name: $name,
+            condition: $condition,
+            max_retries: $retries
+        }
+    };
+    
+    ($name:expr, $condition:expr, wait_duration: $wait:expr) => {
+        $crate::decision_node! {
+            name: $name,
+            condition: $condition,
+            wait_duration: $wait
+        }
+    };
+    
+    ($name:expr, $condition:expr, max_retries: $retries:expr, wait_duration: $wait:expr) => {
+        $crate::decision_node! {
+            name: $name,
+            condition: $condition,
+            max_retries: $retries,
+            wait_duration: $wait
+        }
+    };
+}
+
+/// Creates a processing pipeline that transforms data through multiple steps.
+///
+/// # Examples
+///
+/// ```rust
+/// use rpocketflow::pipeline;
+/// use serde_json::json;
+///
+/// // Create a data processing pipeline
+/// let process = pipeline!("DataProcessor", 
+///     // Step 1: Extract value
+///     |data| {
+///         let value = data["input"].as_i64().unwrap_or(0);
+///         Ok(json!(value))
+///     },
+///     // Step 2: Double the value
+///     |value| {
+///         let doubled = value.as_i64().unwrap_or(0) * 2;
+///         Ok(json!(doubled))
+///     },
+///     // Step 3: Format as object
+///     |doubled| {
+///         Ok(json!({
+///             "original": doubled / 2,
+///             "result": doubled
+///         }))
+///     }
+/// );
+/// ```
+#[macro_export]
+macro_rules! pipeline {
+    ($name:expr, $($step:expr),+) => {
+        $crate::processing_chain! {
+            name: $name,
+            steps: [$($step),+]
+        }
+    };
+    
+    ($name:expr, $($step:expr),+ ; max_retries: $retries:expr) => {
+        $crate::processing_chain! {
+            name: $name,
+            steps: [$($step),+],
+            max_retries: $retries
+        }
+    };
+    
+    ($name:expr, $($step:expr),+ ; wait_duration: $wait:expr) => {
+        $crate::processing_chain! {
+            name: $name,
+            steps: [$($step),+],
+            wait_duration: $wait
+        }
+    };
+}
+
+
+```
+
+### ./src/async_node.rs
+
+```rust
+#![allow(unused)]
+use crate::sync::{Action, Node, NodeRef, NodeResult, Shared, SyncNode};
+use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
+
+#[async_trait]
+pub trait AsyncNode: Node {
+    async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        println!("AsyncNode exec_async called with prep_res: {}", prep_res);
+        Ok(Value::Null)
+    }
+
+    async fn post_async(
+        &mut self,
+        shared: &mut Shared,
+        prep_res: &Value,
+        exec_res: &Value,
+    ) -> NodeResult<Value> {
+        Ok(Value::Null)
+    }
+
+    async fn exec_fallback_async(&mut self, prep_res: &Value, err: String) -> NodeResult<Value> {
+        Err(err)
+    }
+
+    async fn _exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        let max_retries = self.get_max_retries();
+        for i in 0..max_retries {
+            let res = self.exec_async(prep_res).await;
+            match res {
+                Ok(val) => return Ok(val),
+                Err(e) => {
+                    if i == max_retries - 1 {
+                        return self.exec_fallback_async(prep_res, e).await;
+                    } else {
+                        let wait = self.get_wait_duration();
+                        if wait > Duration::from_secs(0) {
+                            sleep(wait).await;
+                        }
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    async fn _run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        let prep_res = self.prep_async(shared).await?;
+        let exec_res = self._exec_async(&prep_res).await?;
+        let post_res = self.post_async(shared, &prep_res, &exec_res).await?;
+        Ok(Action::from(&post_res))
+    }
+
+    async fn run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        if !self.get_successors().is_empty() {
+            println!("Warning: Node won't run successors. Use AsyncFlow.");
+        }
+        self._run_async(shared).await
+    }
+}
+
+pub struct AsyncNodeImpl {
+    pub base: crate::sync::BaseNode,
+}
+
+impl AsyncNodeImpl {
+    pub fn new(name: impl Into<String>) -> Self {
+        AsyncNodeImpl {
+            base: crate::sync::BaseNode::new(name),
+        }
+    }
+
+    pub fn with_max_retries(mut self, max_retries: usize) -> Self {
+        self.base = self.base.with_max_retries(max_retries);
+        self
+    }
+
+    pub fn with_wait_duration(mut self, wait_duration: Duration) -> Self {
+        self.base = self.base.with_wait_duration(wait_duration);
+        self
+    }
+}
+
+impl Node for AsyncNodeImpl {
+    fn get_params(&self) -> &HashMap<String, Value> {
+        self.base.get_params()
+    }
+
+    fn set_params(&mut self, params: HashMap<String, Value>) {
+        self.base.set_params(params);
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        self.base.get_successors()
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        self.base.get_successors_mut()
+    }
+
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.base.get_max_retries()
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.base.get_wait_duration()
+    }
+}
+
+#[async_trait]
+impl AsyncNode for AsyncNodeImpl {
+    async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        // Simply delegate to the sync implementation for default behavior
+        self.base.prep(shared)
+    }
+
+    async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        println!(
+            "AsyncNodeImpl exec_async called with prep_res: {}",
+            prep_res
+        );
+        Ok(Value::Null)
+    }
+
+    async fn post_async(
+        &mut self,
+        shared: &mut Shared,
+        prep_res: &Value,
+        exec_res: &Value,
+    ) -> NodeResult<Value> {
+        // Simply delegate to the sync implementation for default behavior
+        self.base.post(shared, prep_res, exec_res)
+    }
+}
+
+pub struct AsyncFlow {
+    pub base: AsyncNodeImpl,
+    pub start: NodeRef,
+}
+
+impl AsyncFlow {
+    pub fn new(name: impl Into<String>, start: NodeRef) -> Self {
+        AsyncFlow {
+            base: AsyncNodeImpl::new(name),
+            start,
+        }
+    }
+
+    pub async fn orchestrate(
+        &self,
+        shared: &mut Shared,
+        params_override: Option<HashMap<String, Value>>,
+    ) -> NodeResult<()> {
+        let p = params_override.unwrap_or_else(|| self.base.get_params().clone());
+        let mut curr = self.start.clone();
+
+        loop {
+            let action = {
+                let mut node = match curr.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => {
+                        println!("Mutex was poisoned. Recovering and continuing.");
+                        poisoned.into_inner()
+                    }
+                };
+
+                node.set_params(p.clone());
+
+                match node._run(shared) {
+                    Ok(action) => {
+                        if action == Action::Terminate {
+                            println!(
+                                "Flow '{}' terminated by node '{}'",
+                                self.base.get_name(),
+                                node.get_name()
+                            );
+                            return Ok(());
+                        }
+
+                        // Get the next node before dropping the lock
+                        let action_str = action.to_string();
+                        let next_node_option =
+                            if let Some(next) = node.get_successors().get(&action_str) {
+                                Some(next.clone())
+                            } else if action != Action::Default {
+                                if let Some(next) = node.get_successors().get("default") {
+                                    Some(next.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                        // Release the lock before moving to the next node
+                        drop(node);
+
+                        if let Some(next_node) = next_node_option {
+                            curr = next_node;
+                            continue;
+                        } else {
+                            // No successor found, end the flow
+                            println!("Flow '{}' ended naturally", self.base.get_name());
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error in Flow '{}' execution: {}", self.base.get_name(), e);
+                        return Err(format!("Flow error: {}", e));
+                    }
+                }
+            };
+        }
+    }
+}
+
+impl Node for AsyncFlow {
+    fn get_params(&self) -> &HashMap<String, Value> {
+        self.base.get_params()
+    }
+
+    fn set_params(&mut self, params: HashMap<String, Value>) {
+        self.base.set_params(params);
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        self.base.get_successors()
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        self.base.get_successors_mut()
+    }
+
+    fn get_name(&self) -> &str {
+        self.base.get_name()
+    }
+
+    fn get_max_retries(&self) -> usize {
+        self.base.get_max_retries()
+    }
+
+    fn get_wait_duration(&self) -> Duration {
+        self.base.get_wait_duration()
+    }
+}
+
+#[async_trait]
+impl AsyncNode for AsyncFlow {
+    async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        self.base.prep_async(shared).await
+    }
+
+    async fn exec_async(&mut self, _prep_res: &Value) -> NodeResult<Value> {
+        Err("AsyncFlow doesn't support direct execution".to_string())
+    }
+
+    async fn post_async(
+        &mut self,
+        shared: &mut Shared,
+        prep_res: &Value,
+        _exec_res: &Value,
+    ) -> NodeResult<Value> {
+        self.base.post_async(shared, prep_res, &Value::Null).await
+    }
+
+    async fn _run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
+        let prep_res = self.prep_async(shared).await?;
+        self.orchestrate(shared, None).await?;
+        let post_result = self.post_async(shared, &prep_res, &Value::Null).await?;
+        Ok(Action::from(&post_result))
+    }
+}
+
+```
+

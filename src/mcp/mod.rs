@@ -11,6 +11,7 @@ use crate::sync::{Node, NodeRef, NodeResult, Params, Shared, BaseNode, SyncNode}
 
 pub mod models;
 pub mod tools;
+pub mod macros;
 #[cfg(test)]
 pub mod tests;
 

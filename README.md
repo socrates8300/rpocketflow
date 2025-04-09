@@ -1,12 +1,12 @@
-### RPocketFlow
+# RPocketFlow
 
 A lightweight, flexible workflow orchestration library for Rust that simplifies the creation and execution of complex agent-based workflows with minimal overhead.
 
-#### Overview
+## Overview
 
 RPocketFlow supports both synchronous and asynchronous execution models, enabling you to build modular workflows with interconnected nodes. Whether you're implementing linear pipelines, branching paths, or complex state machines, RPocketFlow provides a robust framework that emphasizes clarity, minimal boilerplate, and efficient error handling.
 
-#### Features
+## Features
 
 RPocketFlow offers a modular node-based architecture, making it easy to build and reuse workflow components. It supports both synchronous and asynchronous operations (using Tokio), intuitive flow control with branching and retry mechanisms, and shared state management for data passing between nodes. The builder-pattern API further minimizes boilerplate and helps you focus on your business logic, all while keeping dependencies to a minimum.
 
@@ -17,7 +17,7 @@ Additionally, RPocketFlow includes integration with Anthropic's Model Context Pr
 - Conversation history management
 - Seamless integration with RPocketFlow's node-based architecture
 
-#### Installation
+## Installation
 
 Add RPocketFlow to your `Cargo.toml`:
 
@@ -43,9 +43,9 @@ anthropic = "0.0.8"  # Official Anthropic API client
 serde = { version = "1.0", features = ["derive"] }
 ```
 
-#### Quick Start
+## Quick Start
 
-##### Basic Synchronous Flow
+### Basic Synchronous Flow
 
 Below is an example of a simple synchronous flow using custom nodes:
 
@@ -106,7 +106,7 @@ fn main() {
 }
 ```
 
-##### Asynchronous Flow
+### Asynchronous Flow
 
 For workflows requiring asynchronous execution, consider this example:
 
@@ -175,7 +175,7 @@ async fn main() {
 }
 ```
 
-#### MCP Integration: Using Claude AI in Workflows
+## MCP Integration: Using Claude AI in Workflows
 
 RPocketFlow makes it easy to incorporate Claude AI models into your workflows using the MCP (Model Context Protocol) integration. Here's how to create a simple conversational agent:
 
@@ -241,7 +241,7 @@ fn main() {
 }
 ```
 
-##### Using Tool Calling with Claude
+### Using Tool Calling with Claude
 
 You can enhance Claude's capabilities by providing tools that it can call:
 
@@ -285,11 +285,348 @@ registry.register(weather_tool);
 // (See the full example in examples/mcp_example.rs)
 ```
 
-#### MCP Integration: Troubleshooting
+## Enhanced Macros for Simplified Workflow Creation
+
+RPocketFlow offers a set of enhanced macros that make it even easier to build workflows with minimal boilerplate while maintaining full backward compatibility with existing code.
+
+### Node Creation with `create_node!`
+
+The `create_node!` macro provides a more concise syntax for creating nodes:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Simple node with just an execution function
+let simple_node = create_node!("SimpleNode", |_| {
+    println!("Node executed!");
+    Ok(json!("continue"))
+});
+
+// Full node with prep, exec, and post handlers
+let full_node = create_node!("FullNode", 
+    prep: |shared| {
+        shared.insert("prepared".to_string(), json!(true));
+        Ok(json!({"data": 42}))
+    },
+    exec: |prep_res| {
+        let data = prep_res["data"].as_i64().unwrap_or(0);
+        Ok(json!(data * 2))
+    },
+    post: |shared, prep_res, exec_res| {
+        shared.insert("result".to_string(), exec_res.clone());
+        Ok(json!("next_step"))
+    }
+);
+
+// Node with retry configuration
+let resilient_node = create_node!("ResilientNode", 
+    exec: |_| {
+        // Some potentially failing operation
+        Ok(json!("success"))
+    },
+    max_retries: 3,
+    wait_duration: std::time::Duration::from_millis(100)
+);
+```
+
+### Simplified Flow Creation
+
+#### Sequential Flows with `sequential_flow!`
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create some nodes
+let node1 = create_node!("Step1", |_| Ok(json!("continue")));
+let node2 = create_node!("Step2", |_| Ok(json!("continue")));
+let node3 = create_node!("Step3", |_| Ok(json!("done")));
+
+// Create a sequential flow (much simpler than the original syntax)
+let flow = sequential_flow!("MyFlow", node1, node2, node3);
+```
+
+#### Branching Flows with `branching_flow!`
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create some nodes
+let start = create_node!("Start", |_| Ok(json!("path_a")));
+let path_a = create_node!("PathA", |_| Ok(json!("done")));
+let path_b = create_node!("PathB", |_| Ok(json!("done")));
+let end = create_node!("End", |_| Ok(json!("terminate")));
+
+// Create a branching flow with a clearer syntax
+let flow = branching_flow!("BranchingFlow", start => {
+    "path_a" => path_a => "default" => end,
+    "path_b" => path_b => "default" => end
+});
+```
+
+### Decision Nodes with `decide!`
+
+The `decide!` macro simplifies creating decision nodes:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create a decision node that routes based on the "score" in shared state
+let router = decide!("Router", |_, shared| {
+    if let Some(score) = shared.get("score") {
+        if score.as_f64().unwrap_or(0.0) > 0.7 {
+            "high_path"
+        } else if score.as_f64().unwrap_or(0.0) > 0.3 {
+            "medium_path"
+        } else {
+            "low_path"
+        }
+    } else {
+        "error_path"
+    }
+});
+
+// Notice you can return &str instead of String, making the code cleaner
+```
+
+### Processing Pipelines with `pipeline!`
+
+The `pipeline!` macro creates data processing chains:
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create a data processing pipeline
+let processor = pipeline!("DataProcessor", 
+    // Step 1: Extract value
+    |data| {
+        let value = data["input"].as_i64().unwrap_or(0);
+        Ok(json!(value))
+    },
+    // Step 2: Double the value
+    |value| {
+        let doubled = value.as_i64().unwrap_or(0) * 2;
+        Ok(json!(doubled))
+    },
+    // Step 3: Format as object
+    |doubled| {
+        Ok(json!({
+            "original": doubled / 2,
+            "result": doubled
+        }))
+    }
+);
+```
+
+## MCP-Specific Macros
+
+RPocketFlow includes macros specifically designed for MCP integration.
+
+### Quick MCP Node Creation with `mcp_simple!`
+
+```rust
+use rpocketflow::*;
+use std::env;
+
+// Get API key from environment
+let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
+
+// Create an MCP node with minimal configuration
+let claude = mcp_simple!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
+
+// With system prompt
+let claude_with_prompt = mcp_simple!(
+    "ClaudeAssistant", 
+    api_key, 
+    Models::CLAUDE_3_SONNET,
+    "You are a helpful assistant specialized in Rust programming."
+);
+
+// With full configuration
+let claude_full = mcp_simple!(
+    "ClaudeAssistant", 
+    api_key, 
+    Models::CLAUDE_3_OPUS,
+    "You are a helpful assistant specialized in Rust programming.",
+    2000,  // max_tokens
+    0.7    // temperature
+);
+```
+
+### Easy Tool Creation with `mcp_tool!`
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create a weather tool
+let weather_tool = mcp_tool!(
+    "get_weather", 
+    "Get the weather for a location", 
+    [
+        ("location", "The city and country to get weather for")
+    ], 
+    |args| {
+        let location = args["location"].as_str().unwrap_or("unknown");
+        Ok(json!({
+            "temperature": 72,
+            "condition": "sunny",
+            "location": location
+        }))
+    }
+);
+
+// Create a calculator tool
+let calculator_tool = mcp_tool!(
+    "calculate", 
+    "Perform a mathematical calculation", 
+    [
+        ("expression", "The mathematical expression to evaluate")
+    ], 
+    |args| {
+        let expression = args["expression"].as_str().unwrap_or("0");
+        // In a real implementation, you would evaluate the expression
+        Ok(json!({
+            "result": 42,
+            "expression": expression
+        }))
+    }
+);
+```
+
+### Registering Multiple Tools with `register_tools!`
+
+```rust
+use rpocketflow::*;
+use serde_json::json;
+
+// Create a tool registry with multiple tools
+let registry = register_tools! {
+    mcp_tool!("get_weather", "Get weather information", [
+        ("location", "City name")
+    ], |args| {
+        let location = args["location"].as_str().unwrap_or("unknown");
+        Ok(json!({"temp": 72, "condition": "sunny"}))
+    }),
+    
+    mcp_tool!("calculate", "Perform basic math", [
+        ("expression", "Mathematical expression to evaluate")
+    ], |args| {
+        let expr = args["expression"].as_str().unwrap_or("0");
+        Ok(json!({"result": 42}))
+    })
+};
+```
+
+### Complete MCP Flow with `mcp_flow!`
+
+```rust
+use rpocketflow::*;
+use std::env;
+
+// Get API key from environment
+let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
+
+// Create a complete MCP flow with input and output handling
+let flow = mcp_flow!("ConversationFlow", 
+    api_key, 
+    Models::CLAUDE_3_SONNET,
+    system: "You are a helpful assistant that provides concise answers."
+);
+
+// With additional parameters
+let flow_with_params = mcp_flow!("ConversationFlow", 
+    api_key, 
+    Models::CLAUDE_3_OPUS,
+    system: "You are a helpful assistant that provides concise answers.",
+    max_tokens: 2000,
+    temperature: 0.7
+);
+```
+
+## Comparing Original vs. Enhanced Syntax
+
+### Original Syntax
+
+```rust
+// Creating a node
+let node = node_impl! {
+    name: "MyNode",
+    prep: |shared| {
+        shared.insert("prepared".to_string(), Value::Bool(true));
+        Ok(Value::Null)
+    },
+    exec: |prep_res| {
+        // Execute node logic
+        Ok(Value::Null)
+    }
+};
+
+// Creating a flow
+let flow = flow! {
+    name: "MyFlow",
+    nodes: [node1, node2, node3]
+};
+
+// Decision node
+let decision = decision_node! {
+    name: "MyDecision",
+    condition: |params, shared| {
+        // Complex decision logic
+        "default".to_string()
+    }
+};
+
+// Creating an MCP node
+let mcp_config = McpConfig::new(api_key, Models::CLAUDE_3_HAIKU)
+    .with_system_prompt("You are a helpful assistant")
+    .with_max_tokens(1000);
+let mcp_node = mcp_node("ClaudeNode", mcp_config);
+```
+
+### Enhanced Syntax
+
+```rust
+// Creating a node
+let node = create_node!("MyNode", 
+    prep: |shared| {
+        shared.insert("prepared".to_string(), json!(true));
+        Ok(json!(null))
+    },
+    exec: |prep_res| {
+        // Execute node logic
+        Ok(json!(null))
+    }
+);
+
+// Simple exec-only node
+let simple_node = create_node!("SimpleNode", |_| {
+    Ok(json!("done"))
+});
+
+// Creating a flow 
+let flow = sequential_flow!("MyFlow", node1, node2, node3);
+
+// Decision node
+let decision = decide!("MyDecision", |params, shared| {
+    // Simpler decision logic returning &str instead of String
+    "default"
+});
+
+// Creating an MCP node
+let mcp_node = mcp_simple!("ClaudeNode", api_key, Models::CLAUDE_3_HAIKU, 
+    "You are a helpful assistant", 1000);
+```
+
+## MCP Integration: Troubleshooting
 
 If you encounter issues with the MCP integration, here are some common problems and solutions:
 
-##### Connection Issues
+### Connection Issues
 
 If you're having trouble connecting to MCP servers:
 
@@ -305,7 +642,7 @@ If you're having trouble connecting to MCP servers:
    - Use the `.env` file and the `dotenv` crate to manage API keys and server URLs
    - Set `MCP_SERVER_URL` for HTTP connections or configure stdio appropriately
 
-##### Common Errors
+### Common Errors
 
 1. **No MCP Output**:
    - If `shared.get("mcp_output")` returns none, check if the MCP server is responding
@@ -319,97 +656,7 @@ If you're having trouble connecting to MCP servers:
    - Always check that API keys are properly loaded before initiating MCP connections
    - Use `dotenv().ok();` at the start of your application to load environment variables
 
-#### Macros for Simplified Usage
-
-RPocketFlow includes several macros that help reduce boilerplate and streamline common tasks when defining nodes and flows.
-
-##### Node Creation Macros
-
-*Using `node_impl!` for Synchronous Nodes:*
-
-```rust
-// Create a simple node with just an execution function
-let log_node = node_impl! {
-    name: "Logger",
-    exec: |_prep_res| {
-        println!("Log message");
-        Ok(Value::Null)
-    }
-};
-
-// Create a more complex node with all lifecycle hooks
-let processor = node_impl! {
-    name: "DataProcessor",
-    prep: |shared| {
-        // Prepare data
-        Ok(shared.get("input").unwrap_or(&Value::Null).clone())
-    },
-    exec: |prep_res| {
-        // Process data
-        let mut data = prep_res.clone();
-        // ... processing logic
-        Ok(data)
-    },
-    post: |shared, _prep_res, exec_res| {
-        // Store results
-        shared.insert("output".to_string(), exec_res.clone());
-        Ok(Value::Null)
-    },
-    max_retries: 3,
-    wait_duration: Duration::from_millis(100)
-};
-```
-
-*Using `async_node_impl!` for Asynchronous Nodes:*
-
-```rust
-// Create an async node with async execution
-let async_processor = async_node_impl! {
-    name: "AsyncProcessor",
-    exec_async: async |_prep_res| {
-        // Simulate async work
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        Ok(Value::String("processed".to_string()))
-    },
-    max_retries: 3
-};
-```
-
-##### Flow Creation Macros
-
-*Defining Synchronous Flows with `flow!`:*
-
-```rust
-// Create a simple linear flow
-let simple_flow = flow! {
-    name: "SimpleFlow",
-    nodes: [node1, node2, node3]
-};
-
-// Create a branching flow
-let branching_flow = flow! {
-    name: "BranchingFlow",
-    start: decision_node,
-    connections: [
-        (decision_node, "path1", path1_node),
-        (decision_node, "path2", path2_node),
-        (path1_node, "default", end_node),
-        (path2_node, "default", end_node)
-    ]
-};
-```
-
-*Defining Asynchronous Flows with `async_flow!`:*
-
-```rust
-// Create an async flow
-let async_flow = async_flow! {
-    name: "AsyncProcessingFlow",
-    nodes: [fetch_node, process_node, save_node]
-};
-```
-
-#### Core Concepts
+## Core Concepts
 
 At its core, RPocketFlow is built around the following ideas:
 
@@ -418,7 +665,7 @@ At its core, RPocketFlow is built around the following ideas:
 • **Actions:** Outcomes from node execution that determine which successor node will execute next (default, named, or termination).  
 • **Shared State:** A common context (typically a HashMap of JSON values) that enables nodes to exchange data.
 
-#### Advanced Usage
+## Advanced Usage
 
 For more complex scenarios, RPocketFlow supports advanced techniques:
 
@@ -472,21 +719,21 @@ impl SyncNode for CustomNode {
 }
 ```
 
-#### Best Practices for RPocketFlow Applications
+## Best Practices for RPocketFlow Applications
 
-##### Environment Setup
+### Environment Setup
 
 - **Environment Variables**: Always use a `.env` file with the `dotenv` crate for configuration
 - **API Key Management**: Load and validate API keys early in the application lifecycle
 - **Logging**: Configure proper logging to help diagnose flow execution issues
 
-##### Error Handling
+### Error Handling
 
 - Add appropriate timeouts when waiting for external services
 - Include fallback behavior when external services (like MCP servers) are unavailable
 - When using tool integrations, implement proper error handling for API calls
 
-##### Testing MCP Integrations
+### Testing MCP Integrations
 
 Before building complex workflows with MCP:
 
@@ -494,7 +741,7 @@ Before building complex workflows with MCP:
 2. Test individual tools separately to ensure they work as expected
 3. Start with minimal flows and add complexity incrementally
 
-#### Alternative Implementation: Direct API Integration
+## Alternative Implementation: Direct API Integration
 
 If you're experiencing issues with MCP tool integration or prefer direct API control, you can implement your own API clients within RPocketFlow:
 
@@ -603,7 +850,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-#### Architecture
+## Architecture
 
 RPocketFlow is structured around key components:
 
@@ -612,9 +859,9 @@ RPocketFlow is structured around key components:
 • **Node Traits:** The `Node` trait is extended by `SyncNode` for synchronous operations and `AsyncNode` for asynchronous tasks, with `BaseNode` providing a default implementation.  
 • **Workflow Orchestration:** `Flow` and `AsyncFlow` manage the execution order, shared state, and error recovery across nodes.
 
-### Important Usage Notes
+## Important Usage Notes
 
-#### Cloning Nodes in Flow Connections
+### Cloning Nodes in Flow Connections
 
 When connecting nodes in a flow, especially with the branching pattern, remember to clone the node references when using them multiple times:
 
@@ -632,7 +879,7 @@ let flow = flow! {
 
 This is necessary because `Arc<Mutex<>>` values are moved when used, so cloning ensures you can reuse the references.
 
-#### Working with JSON Numbers
+### Working with JSON Numbers
 
 When processing numeric values with the JSON library, be aware that numbers can be represented as either integers or floats. For robust comparisons:
 
@@ -647,7 +894,7 @@ assert!(
 );
 ```
 
-#### Type Annotations in Closures
+### Type Annotations in Closures
 
 Always include type annotations in closures to avoid compilation errors:
 
@@ -661,11 +908,11 @@ let node = node_impl! {
 };
 ```
 
-#### License
+## License
 
 RPocketFlow is licensed under the MIT License.
 
-#### Contributing
+## Contributing
 
 Contributions are welcome! To contribute:
 

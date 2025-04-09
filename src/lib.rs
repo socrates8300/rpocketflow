@@ -1,5 +1,6 @@
 pub mod async_node;
 pub mod macros;
+pub mod improved_macros;  // New module
 pub mod macros_tests;
 pub mod sync;
 pub mod mcp;
@@ -18,3 +19,7 @@ pub use sync::{
 pub use mcp::{McpConfig, McpNode, mcp_node};
 pub use mcp::models::Models;
 pub use mcp::tools::{Tool, ToolRegistry};
+
+// Re-export improved macros
+// These are automatically available at crate root because of #[macro_export]
+
