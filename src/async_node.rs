@@ -1,4 +1,6 @@
 #![allow(unused)]
+use tracing::{info, warn, error, debug};
+use crate::marker_traits::AsyncContext;
 use crate::sync::{Action, Node, NodeRef, NodeResult, Shared, SyncNode};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -7,13 +9,17 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 #[async_trait]
-pub trait AsyncNode: Node {
+pub trait AsyncNode: Node + AsyncContext {
     async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
         Ok(Value::Null)
     }
 
     async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-        println!("AsyncNode exec_async called with prep_res: {}", prep_res);
+        debug!(
+            target: "rpocketflow::async::node",
+            node = %self.get_name(),
+            "AsyncNode exec_async called"
+        );
         Ok(Value::Null)
     }
 
@@ -32,16 +38,24 @@ pub trait AsyncNode: Node {
 
     async fn _exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
         let max_retries = self.get_max_retries();
-        for i in 0..max_retries {
+        for attempt_idx in 0..max_retries {
             let res = self.exec_async(prep_res).await;
             match res {
                 Ok(val) => return Ok(val),
                 Err(e) => {
-                    if i == max_retries - 1 {
+                    if attempt_idx == max_retries - 1 {
                         return self.exec_fallback_async(prep_res, e).await;
                     } else {
                         let wait = self.get_wait_duration();
                         if wait > Duration::from_secs(0) {
+                            debug!(
+                                target: "rpocketflow::async::node",
+                                node = %self.get_name(),
+                                attempt = attempt_idx + 1,
+                                max_attempts = max_retries,
+                                wait_duration = ?wait,
+                                "Node execution failed, retrying"
+                            );
                             sleep(wait).await;
                         }
                     }
@@ -60,7 +74,11 @@ pub trait AsyncNode: Node {
 
     async fn run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
         if !self.get_successors().is_empty() {
-            println!("Warning: Node won't run successors. Use AsyncFlow.");
+            warn!(
+                target: "rpocketflow::async::node",
+                node = %self.get_name(),
+                "Node won't run successors. Use AsyncFlow."
+            );
         }
         self._run_async(shared).await
     }
@@ -130,9 +148,10 @@ impl AsyncNode for AsyncNodeImpl {
     }
 
     async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-        println!(
-            "AsyncNodeImpl exec_async called with prep_res: {}",
-            prep_res
+        debug!(
+            target: "rpocketflow::async::node",
+            node = %self.get_name(),
+            "AsyncNodeImpl exec_async called"
         );
         Ok(Value::Null)
     }
@@ -174,7 +193,11 @@ impl AsyncFlow {
                 let mut node = match curr.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
-                        println!("Mutex was poisoned. Recovering and continuing.");
+                        error!(
+                            target: "rpocketflow::async::flow", 
+                            node = %poisoned.to_string(),
+                            "Mutex was poisoned. Recovering and continuing."
+                        );
                         poisoned.into_inner()
                     }
                 };
@@ -184,10 +207,11 @@ impl AsyncFlow {
                 match node._run(shared) {
                     Ok(action) => {
                         if action == Action::Terminate {
-                            println!(
-                                "Flow '{}' terminated by node '{}'",
-                                self.base.get_name(),
-                                node.get_name()
+                            info!(
+                                target: "rpocketflow::async::flow",
+                                flow = %self.base.get_name(),
+                                node = %node.get_name(),
+                                "Flow terminated by node"
                             );
                             return Ok(());
                         }
@@ -215,12 +239,21 @@ impl AsyncFlow {
                             continue;
                         } else {
                             // No successor found, end the flow
-                            println!("Flow '{}' ended naturally", self.base.get_name());
+                            info!(
+                                target: "rpocketflow::async::flow",
+                                flow = %self.base.get_name(),
+                                "Flow ended naturally"
+                            );
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("Error in Flow '{}' execution: {}", self.base.get_name(), e);
+                        error!(
+                            target: "rpocketflow::async::flow",
+                            flow = %self.base.get_name(),
+                            error = %e,
+                            "Error in flow execution"
+                        );
                         return Err(format!("Flow error: {}", e));
                     }
                 }

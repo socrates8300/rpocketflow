@@ -19,6 +19,12 @@
 - Use macros (node_impl!, flow!, etc.) to reduce boilerplate
 - Ensure proper imports: `use rpocketflow::*` for library usage
 
+## Thread Safety
+- Avoid manual `Send`/`Sync` trait implementations; let Rust's type system handle them
+- Use thread-safe primitives like `Arc<Mutex<>>` for sharing data between threads
+- Ensure all node implementations naturally implement `Send` and `Sync` through their fields
+- Handle mutex poisoning gracefully by recovering the poisoned mutex when appropriate
+
 ## Architecture
 - Nodes are basic building blocks - implement Node trait plus SyncNode or AsyncNode
 - Flows orchestrate nodes, maintain shared state, and handle transitions

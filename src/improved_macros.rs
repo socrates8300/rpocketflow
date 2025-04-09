@@ -1,3 +1,9 @@
+//! Enhanced macros for simplified workflow creation
+//!
+//! This module provides improved macros that make it easier to create nodes,
+//! flows, and other workflow components with less boilerplate while maintaining
+//! backward compatibility with the original macros.
+
 /// Creates a node with a more flexible syntax that allows specifying different handlers
 /// with less verbosity than the original node_impl! macro.
 ///
@@ -109,7 +115,8 @@ macro_rules! sequential_flow {
 /// // Create some nodes
 /// let start = create_node!("Start", |_| Ok(json!("path_a")));
 /// let path_a = create_node!("PathA", |_| Ok(json!("done")));
-/// let path_b = create_node!("PathB", |_| Ok(json!("done")));
+/// let path_b = create
+/// /// let path_b = create_node!("PathB", |_| Ok(json!("done")));
 /// let end = create_node!("End", |_| Ok(json!("terminate")));
 ///
 /// // Create a branching flow
@@ -278,4 +285,3 @@ macro_rules! pipeline {
         }
     };
 }
-

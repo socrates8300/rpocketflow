@@ -1,4 +1,10 @@
+//! Tool functionality for MCP nodes
+//!
+//! This module provides the `Tool` and `ToolRegistry` types for creating and
+//! managing tools that can be called by MCP models.
+
 use std::collections::HashMap;
+use tracing::{debug, warn, error};
 use serde::{Serialize, Deserialize};
 use serde_json::{Value, json};
 
@@ -11,9 +17,35 @@ pub struct Tool {
     pub description: String,
     /// The parameters the tool accepts in JSON Schema format
     pub parameters: Value,
-    /// The function to execute when the tool is called
+    /// The handler state
     #[serde(skip)]
-    pub handler: Option<ToolHandler>,
+    handler_state: HandlerState,
+}
+
+/// State of the tool handler
+enum HandlerState {
+    /// Handler is available
+    Present(ToolHandler),
+    /// Handler was never set
+    None,
+    /// Handler was removed during clone
+    RemovedDuringClone,
+}
+
+impl std::fmt::Debug for HandlerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandlerState::Present(_) => write!(f, "Present(...)"),
+            HandlerState::None => write!(f, "None"),
+            HandlerState::RemovedDuringClone => write!(f, "RemovedDuringClone"),
+        }
+    }
+}
+
+impl Default for HandlerState {
+    fn default() -> Self {
+        HandlerState::None
+    }
 }
 
 impl std::fmt::Debug for Tool {
@@ -22,7 +54,7 @@ impl std::fmt::Debug for Tool {
             .field("name", &self.name)
             .field("description", &self.description)
             .field("parameters", &self.parameters)
-            .field("handler", &self.handler.is_some())
+            .field("handler_available", &self.handler_available())
             .finish()
     }
 }
@@ -37,7 +69,7 @@ impl Clone for Tool {
             name: self.name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
-            handler: None,
+            handler_state: HandlerState::RemovedDuringClone,
         }
     }
 }
@@ -48,7 +80,7 @@ impl Tool {
             name: name.into(),
             description: description.into(),
             parameters,
-            handler: None,
+            handler_state: HandlerState::None,
         }
     }
 
@@ -56,11 +88,25 @@ impl Tool {
     where
         F: Fn(Value) -> Result<Value, String> + Send + Sync + 'static,
     {
-        self.handler = Some(Box::new(handler));
+        self.handler_state = HandlerState::Present(Box::new(handler));
         self
     }
+    
+    /// Check if the tool has a handler available
+    pub fn handler_available(&self) -> bool {
+        matches!(self.handler_state, HandlerState::Present(_))
+    }
+    
+    /// Get handler state description
+    pub fn handler_state_description(&self) -> &'static str {
+        match self.handler_state {
+            HandlerState::Present(_) => "available",
+            HandlerState::None => "not set",
+            HandlerState::RemovedDuringClone => "removed during clone",
+        }
+    }
 
-    /// Convert to Anthropic's tool format
+    /// Convert to API function declaration format
     pub fn to_function_declaration(&self) -> Value {
         json!({
             "name": self.name,
@@ -71,9 +117,26 @@ impl Tool {
 
     /// Execute the tool with the given arguments
     pub fn execute(&self, args: Value) -> Result<Value, String> {
-        match &self.handler {
-            Some(handler) => handler(args),
-            None => Err(format!("No handler defined for tool {}", self.name)),
+        match &self.handler_state {
+            HandlerState::Present(handler) => {
+                debug!(target: "rpocketflow::mcp::tools", tool = %self.name, "Executing tool");
+                handler(args)
+            },
+            HandlerState::None => {
+                error!(target: "rpocketflow::mcp::tools", tool = %self.name, "No handler defined for tool");
+                Err(format!("No handler defined for tool {}", self.name))
+            },
+            HandlerState::RemovedDuringClone => {
+                error!(
+                    target: "rpocketflow::mcp::tools", 
+                    tool = %self.name,
+                    "Handler was removed during cloning"
+                );
+                Err(format!(
+                    "Handler for tool {} was removed during cloning. Use original tool instance for execution.", 
+                    self.name
+                ))
+            },
         }
     }
 }
@@ -81,6 +144,12 @@ impl Tool {
 /// A registry of tools that can be used in an MCP conversation
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolRegistry {
@@ -91,6 +160,15 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Tool) {
+        if !tool.handler_available() {
+            warn!(
+                target: "rpocketflow::mcp::tools",
+                tool = %tool.name,
+                handler_state = %tool.handler_state_description(),
+                "Registering tool without available handler"
+            );
+        }
+        
         self.tools.insert(tool.name.clone(), tool);
     }
 
@@ -110,19 +188,64 @@ impl ToolRegistry {
 
     /// Process tool calls from a model response
     pub fn process_tool_call(&self, name: &str, args: Value) -> Value {
+        debug!(
+            target: "rpocketflow::mcp::tools",
+            tool = %name,
+            "Processing tool call"
+        );
+        
         // Try to execute the function
         let result = match self.get(name) {
-            Some(tool) => tool.execute(args.clone()),
-            None => Err(format!("Tool not found: {}", name)),
+            Some(tool) => {
+                if tool.handler_available() {
+                    tool.execute(args.clone())
+                } else {
+                    error!(
+                        target: "rpocketflow::mcp::tools",
+                        tool = %name,
+                        handler_state = %tool.handler_state_description(),
+                        "Tool found but handler not available"
+                    );
+                    Err(format!(
+                        "Tool handler not available: {} ({})", 
+                        name, 
+                        tool.handler_state_description()
+                    ))
+                }
+            },
+            None => {
+                error!(
+                    target: "rpocketflow::mcp::tools",
+                    tool = %name,
+                    "Tool not found"
+                );
+                Err(format!("Tool not found: {}", name))
+            },
         };
         
         // Convert the result to a response
         match result {
             Ok(value) => match serde_json::to_value(value) {
                 Ok(val) => val,
-                Err(_) => json!({"error": "Failed to serialize result"})
+                Err(e) => {
+                    error!(
+                        target: "rpocketflow::mcp::tools",
+                        tool = %name,
+                        error = %e,
+                        "Failed to serialize result"
+                    );
+                    json!({"error": format!("Failed to serialize result: {}", e)})
+                }
             },
-            Err(e) => json!({"error": e}),
+            Err(e) => {
+                error!(
+                    target: "rpocketflow::mcp::tools",
+                    tool = %name,
+                    error = %e,
+                    "Tool execution failed"
+                );
+                json!({"error": e})
+            },
         }
     }
 }
@@ -159,3 +282,4 @@ pub fn object_param(description: &str, properties: HashMap<&str, Value>) -> Valu
         "properties": properties
     })
 }
+

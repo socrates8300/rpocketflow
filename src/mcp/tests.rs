@@ -1,62 +1,97 @@
+#![allow(unused)]
 #[cfg(test)]
-mod tests {
-    use crate::*;
+mod mcp_node_tests {
+    use crate::mcp::models::Models;
+    use crate::mcp::{mcp_node, McpConfig};
+    use crate::sync::{Node, Shared, SyncNode};
     use serde_json::json;
-    use anthropic::types::Role;
+    use std::collections::HashMap;
+    use std::env;
 
-    // Helper to create a mock MCP config
-    fn mock_mcp_config() -> McpConfig {
-        McpConfig::new("test-api-key", Models::CLAUDE_3_HAIKU)
-            .with_system_prompt("You are a test assistant.")
+    #[tokio::test]
+    async fn test_mcp_node_creation() {
+        let config = McpConfig::new("test_key", Models::CLAUDE_3_HAIKU)
+            .with_system_prompt("Test prompt")
             .with_max_tokens(100)
-            .with_temperature(0.0)
-    }
+            .with_temperature(0.5);
 
-    #[test]
-    fn test_message_creation() {
-        let mut node = McpNode::new("TestNode", mock_mcp_config());
-        
-        // Add a user message
-        node.add_message("user", "Hello world");
-        
-        // Check that the message was added correctly
-        assert_eq!(node.messages.len(), 1);
-        assert_eq!(node.messages[0].1, "Hello world");
-        assert!(matches!(node.messages[0].0, Role::User));
+        let node = mcp_node("TestNode", config);
+
+        // Verify the node was created with the correct name
+        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
+        assert_eq!(node_ref.get_name(), "TestNode");
     }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use crate::mcp::protocol::{mcp_protocol_node, MCPClientConfig};
+    use crate::sync::{Node, Shared, SyncNode};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_mcp_protocol_node_creation() {
+        let config = MCPClientConfig::new("TestClient", "1.0.0");
+        let node = mcp_protocol_node("TestProtocolNode", config);
+
+        // Verify the node was created with the correct name
+        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
+        assert_eq!(node_ref.get_name(), "TestProtocolNode");
+    }
+}
+
+#[cfg(test)]
+mod tool_registry_tests {
+    use crate::mcp::tools::{string_param, Tool, ToolRegistry};
+    use serde_json::json;
 
     #[test]
     fn test_tool_registry() {
         // Create a tool registry
         let mut registry = ToolRegistry::new();
-        
-        // Add a test tool
+
+        // Create a test tool
         let test_tool = Tool::new(
             "test_tool",
             "A test tool",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The query to process"}
+                    "input": string_param("Test input parameter")
                 },
-                "required": ["query"]
-            })
-        ).with_handler(|args| {
-            let query = args.get("query")
+                "required": ["input"]
+            }),
+        )
+        .with_handler(|args| {
+            let input = args
+                .get("input")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-                
+                .unwrap_or("default");
+
             Ok(json!({
-                "result": format!("Processed: {}", query)
+                "output": format!("Processed: {}", input)
             }))
         });
-        
+
+        // Register the tool
         registry.register(test_tool);
-        
+
+        // Verify tool retrieval
+        let retrieved_tool = registry.get("test_tool").expect("Tool should exist");
+        assert_eq!(retrieved_tool.name, "test_tool");
+        assert_eq!(retrieved_tool.description, "A test tool");
+
         // Test tool execution
-        let args = json!({"query": "test query"});
-        let result = registry.process_tool_call("test_tool", args);
-        
-        assert_eq!(result["result"], "Processed: test query");
+        let result = registry.process_tool_call("test_tool", json!({"input": "test_value"}));
+        assert_eq!(
+            result.get("output").and_then(|v| v.as_str()),
+            Some("Processed: test_value")
+        );
+
+        // Test non-existent tool
+        let error_result = registry.process_tool_call("nonexistent_tool", json!({}));
+        assert!(error_result.get("error").is_some());
     }
 }
+

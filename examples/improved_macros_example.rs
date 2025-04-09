@@ -1,34 +1,49 @@
+//! Example showcasing the improved macros in RPocketFlow
+//!
+//! This example demonstrates how to use the new macro syntax to create
+//! workflows with less boilerplate code.
+
 use rpocketflow::*;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::env;
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Set up tracing
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::DEBUG)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+    
+    info!("Starting improved macros example");
+    
     // Get API key from environment (for MCP examples)
     let api_key = env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "demo_key".to_string());
     
     // Example 1: Simple node with improved syntax
-    println!("Example 1: Creating a simple node");
+    info!("Example 1: Creating a simple node");
     let simple_node = create_node!("SimpleNode", |_| {
-        println!("Node executed!");
+        info!("Node executed!");
         Ok(json!("done"))
     });
     
     // Example 2: Sequential flow with simpler syntax
-    println!("Example 2: Creating a sequential flow");
+    info!("Example 2: Creating a sequential flow");
     let node1 = create_node!("Step1", |_| {
-        println!("Step 1 executed");
+        info!("Step 1 executed");
         Ok(json!("continue"))
     });
     
     let node2 = create_node!("Step2", |_| {
-        println!("Step 2 executed");
+        info!("Step 2 executed");
         Ok(json!("continue"))
     });
     
     let node3 = create_node!("Step3", |_| {
-        println!("Step 3 executed");
+        info!("Step 3 executed");
         Ok(json!("done"))
     });
     
@@ -38,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     flow.orchestrate(&mut shared, None)?;
     
     // Example 3: Decision node with simplified syntax
-    println!("Example 3: Using a decision node");
+    info!("Example 3: Using a decision node");
     let decision = decide!("RouteDecision", |_, shared| {
         if let Some(score) = shared.get("score") {
             if score.as_f64().unwrap_or(0.0) > 0.5 {
@@ -53,14 +68,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let high_path = create_node!("HighPath", 
         exec: |_| {
-            println!("Taking high path");
+            info!("Taking high path");
             Ok(json!("done"))
         }
     );
     
     let low_path = create_node!("LowPath", 
         exec: |_| {
-            println!("Taking low path");
+            info!("Taking low path");
             Ok(json!("done"))
         }
     );
@@ -80,18 +95,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     decision.lock().unwrap().run(&mut shared2)?;
     
     // Example 4: Processing pipeline
-    println!("Example 4: Creating a data processing pipeline");
+    info!("Example 4: Creating a data processing pipeline");
     let process = pipeline!("DataProcessor", 
         // Step 1: Parse input
         |data| {
-            println!("Pipeline step 1: Parsing input");
+            info!("Pipeline step 1: Parsing input");
             let input = data.as_object()
                 .ok_or_else(|| "Expected object input".to_string())?;
             Ok(json!(input))
         },
         // Step 2: Transform data
         |data| {
-            println!("Pipeline step 2: Transforming data");
+            info!("Pipeline step 2: Transforming data");
             let input_value = data.get("value")
                 .ok_or_else(|| "Missing 'value' field".to_string())?
                 .as_i64().unwrap_or(0);
@@ -99,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         // Step 3: Format output
         |data| {
-            println!("Pipeline step 3: Formatting output");
+            info!("Pipeline step 3: Formatting output");
             let value = data.as_i64().unwrap_or(0);
             Ok(json!({
                 "original": value / 2,
@@ -114,18 +129,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node = process.lock().unwrap();
     let prep_res = node.prep(&mut shared)?;
     let result = node.exec(&prep_res)?;
-    println!("Pipeline result: {}", result);
+    info!("Pipeline result: {}", result);
     
-    // Example 5: MCP integration (no actual API call)
-    println!("Example 5: MCP integration");
+    // Example 5: MCP integration
+    info!("Example 5: MCP integration");
     
     // Create tools for function calling
-    let tools = register_tools! {
-        mcp_tool!("get_weather", "Get weather for a location", {
-            "location": "The city and state/country"
-        }, |args| {
+    let tools = mcp_tools! {
+        mcp_tool!("get_weather", "Get weather for a location", [
+            ("location", "The city and state/country")
+        ], |args| {
             let location = args["location"].as_str().unwrap_or("unknown");
-            println!("Tool called: get_weather for {}", location);
+            info!("Tool called: get_weather for {}", location);
             Ok(json!({
                 "temperature": 72,
                 "condition": "sunny",
@@ -134,11 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }))
         }),
         
-        mcp_tool!("calculate", "Calculate a math expression", {
-            "expression": "The mathematical expression to evaluate"
-        }, |args| {
+        mcp_tool!("calculate", "Calculate a math expression", [
+            ("expression", "The mathematical expression to evaluate")
+        ], |args| {
             let expr = args["expression"].as_str().unwrap_or("0");
-            println!("Tool called: calculate with expression {}", expr);
+            info!("Tool called: calculate with expression {}", expr);
             // Just a dummy result for the example
             Ok(json!({
                 "result": 42,
@@ -147,37 +162,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
     
-    // In a real implementation, you would add these tools to your MCP node
-    // and make actual API calls
-    
-    // Create a simple MCP flow
+    // Create a simple MCP node with tools
     let system_prompt = "You are a helpful assistant that provides concise answers.";
-    let flow = mcp_flow!("SimpleConversation", api_key, Models::CLAUDE_3_HAIKU,
-        system: system_prompt,
-        max_tokens: 1000
-    );
+    let mcp_config = McpConfig::new(api_key, Models::CLAUDE_3_HAIKU)
+        .with_system_prompt(system_prompt)
+        .with_max_tokens(1000);
     
-    println!("Created MCP flow: {}", flow.get_name());
+    let mcp = mcp_node_with_tools("Claude", mcp_config, tools);
+    
+    info!("Created MCP node with tools");
     
     // Example 6: Branching flow with simplified syntax
-    println!("Example 6: Creating a branching flow");
+    info!("Example 6: Creating a branching flow");
     let start = create_node!("Start", |_| {
-        println!("Start node executed");
+        info!("Start node executed");
         Ok(json!("path_a"))
     });
     
     let path_a = create_node!("PathA", |_| {
-        println!("Path A executed");
+        info!("Path A executed");
         Ok(json!("done"))
     });
     
     let path_b = create_node!("PathB", |_| {
-        println!("Path B executed");
+        info!("Path B executed");
         Ok(json!("done"))
     });
     
     let end = create_node!("End", |_| {
-        println!("End node executed");
+        info!("End node executed");
         Ok(json!("terminate"))
     });
     
@@ -190,7 +203,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shared = HashMap::new();
     bf.orchestrate(&mut shared, None)?;
     
-    println!("All examples completed successfully!");
+    info!("All examples completed successfully!");
     Ok(())
 }
-

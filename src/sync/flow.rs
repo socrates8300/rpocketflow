@@ -1,4 +1,5 @@
 #![allow(unused)]
+use tracing::{info, warn, error, debug};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::MutexGuard;
@@ -44,11 +45,12 @@ impl Flow {
 
         // No successor found
         if !node_guard.get_successors().is_empty() {
-            println!(
-                "Flow ends: action '{}' not found in node '{}'. Available actions: {:?}",
-                action,
-                node_guard.get_name(),
-                node_guard.get_successors().keys().collect::<Vec<_>>()
+            warn!(
+                target: "rpocketflow::sync::flow",
+                flow_action = %action,
+                node = %node_guard.get_name(),
+                available_actions = ?node_guard.get_successors().keys().collect::<Vec<_>>(),
+                "Flow ended: action not found in node"
             );
         }
 
@@ -69,7 +71,11 @@ impl Flow {
                 let mut node = match curr.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
-                        println!("Mutex was poisoned. Recovering and continuing.");
+                        error!(
+                            target: "rpocketflow::sync::flow",
+                            node = %poisoned.to_string(),
+                            "Mutex was poisoned. Recovering and continuing."
+                        );
                         poisoned.into_inner()
                     }
                 };
@@ -79,10 +85,11 @@ impl Flow {
                 match node._run(shared) {
                     Ok(action) => {
                         if action == Action::Terminate {
-                            println!(
-                                "Flow '{}' terminated by node '{}'",
-                                self.base.name,
-                                node.get_name()
+                            info!(
+                                target: "rpocketflow::sync::flow",
+                                flow = %self.base.name, 
+                                node = %node.get_name(),
+                                "Flow terminated by node"
                             );
                             return Ok(());
                         }
@@ -98,12 +105,21 @@ impl Flow {
                             continue;
                         } else {
                             // No successor found, end the flow
-                            println!("Flow '{}' ended naturally", self.base.name);
+                            info!(
+                                target: "rpocketflow::sync::flow",
+                                flow = %self.base.name,
+                                "Flow ended naturally"
+                            );
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("Error in Flow '{}' execution: {}", self.base.name, e);
+                        error!(
+                            target: "rpocketflow::sync::flow",
+                            flow = %self.base.name,
+                            error = %e,
+                            "Error in flow execution"
+                        );
                         return Err(format!("Flow error: {}", e));
                     }
                 }

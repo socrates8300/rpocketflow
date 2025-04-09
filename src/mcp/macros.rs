@@ -1,26 +1,39 @@
-/// Create a simple MCP node with minimal configuration requirements.
+//! Macros for simplified MCP integration
+//!
+//! This module provides macros for creating MCP nodes, tools, and flows
+//! with minimal boilerplate.
+
+/// Create an MCP node with minimal configuration requirements.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use rpocketflow::{mcp_simple, Models};
+/// use rpocketflow::{mcp_node, Models};
 /// use std::env;
 ///
 /// // Create a basic MCP node using Claude
 /// let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
-/// let claude = mcp_simple!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
+/// let claude = mcp_node!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
 /// ```
 #[macro_export]
-macro_rules! mcp_simple {
+macro_rules! mcp_node {
     ($name:expr, $api_key:expr, $model:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model);
         mcp_node($name, config)
     }};
     
     ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model)
             .with_system_prompt($system_prompt);
@@ -28,7 +41,11 @@ macro_rules! mcp_simple {
     }};
     
     ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr, $max_tokens:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model)
             .with_system_prompt($system_prompt)
@@ -37,7 +54,11 @@ macro_rules! mcp_simple {
     }};
     
     ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr, $max_tokens:expr, $temperature:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model)
             .with_system_prompt($system_prompt)
@@ -73,8 +94,12 @@ macro_rules! mcp_tool {
     ($name:expr, $description:expr, [
         $(($param_name:expr, $param_desc:expr)),+ $(,)?
     ], $handler:expr) => {{
-        use $crate::mcp::tools::{Tool, string_param};
-        use serde_json::json;
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use serde_json::json;
+            pub use $crate::mcp::tools::{Tool, string_param};
+        }
+        use __rpf_macro_imports::*;
         
         let parameters = json!({
             "type": "object",
@@ -110,8 +135,12 @@ macro_rules! mcp_flow {
      $(, max_tokens: $max_tokens:expr)?
      $(, temperature: $temp:expr)?
     ) => {{
-        use $crate::{async_flow, create_node, mcp_simple};
-        use serde_json::json;
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::{async_flow, create_node, mcp_node};
+            pub use serde_json::json;
+        }
+        use __rpf_macro_imports::*;
         
         // Create input node
         let input_node = create_node!("InputNode", 
@@ -121,7 +150,7 @@ macro_rules! mcp_flow {
         );
         
         // Create MCP node
-        let mcp_node = mcp_simple!("McpNode", $api_key, $model, $system
+        let mcp_node = mcp_node!("McpNode", $api_key, $model, $system
             $(, $max_tokens)?
             $(, $temp)?
         );
@@ -143,11 +172,11 @@ macro_rules! mcp_flow {
 /// # Examples
 ///
 /// ```rust
-/// use rpocketflow::{register_tools, mcp_tool};
+/// use rpocketflow::{mcp_tools, mcp_tool};
 /// use serde_json::json;
 ///
 /// // Create a tool registry with multiple tools
-/// let registry = register_tools! {
+/// let registry = mcp_tools! {
 ///     mcp_tool!("get_weather", "Get weather information", [
 ///         ("location", "City name")
 ///     ], |args| {
@@ -165,9 +194,13 @@ macro_rules! mcp_flow {
 /// };
 /// ```
 #[macro_export]
-macro_rules! register_tools {
+macro_rules! mcp_tools {
     ($($tool:expr),+ $(,)?) => {{
-        use $crate::mcp::tools::ToolRegistry;
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::tools::ToolRegistry;
+        }
+        use __rpf_macro_imports::*;
         
         let mut registry = ToolRegistry::new();
         $(
@@ -177,4 +210,3 @@ macro_rules! register_tools {
         registry
     }};
 }
-

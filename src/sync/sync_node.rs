@@ -1,12 +1,14 @@
+use tracing::debug;
 use serde_json::Value;
 use std::thread;
 
+use crate::marker_traits::SyncContext;
 use super::action::Action;
 use super::node::Node;
 use super::types::{NodeResult, Shared};
 
 /// Trait for synchronous nodes
-pub trait SyncNode: Node {
+pub trait SyncNode: Node + SyncContext {
     /// Preparation phase - fetches necessary data before execution
     fn prep(&mut self, _shared: &mut Shared) -> NodeResult<Value> {
         Ok(Value::Null)
@@ -38,21 +40,22 @@ pub trait SyncNode: Node {
 
         let mut last_error = None;
 
-        for attempt in 0..max_retries {
+        for attempt_idx in 0..max_retries {
             match self.exec(prep_res) {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     last_error = Some(e);
 
-                    if attempt + 1 < max_retries {
+                    if attempt_idx + 1 < max_retries {
                         let wait = self.get_wait_duration();
                         if wait > std::time::Duration::from_secs(0) {
-                            println!(
-                                "Node '{}' execution failed, retrying in {:?} (attempt {}/{})",
-                                self.get_name(),
-                                wait,
-                                attempt + 1,
-                                max_retries
+                            debug!(
+                                target: "rpocketflow::sync::node",
+                                node = %self.get_name(),
+                                attempt = attempt_idx + 1,
+                                max_attempts = max_retries,
+                                wait_duration = ?wait,
+                                "Node execution failed, retrying"
                             );
                             thread::sleep(wait);
                         }
@@ -80,3 +83,4 @@ pub trait SyncNode: Node {
         self._run(shared)
     }
 }
+

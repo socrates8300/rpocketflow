@@ -1,30 +1,420 @@
 ### ./src/lib.rs
 
 ```rust
-pub mod async_node;
-pub mod macros;
-pub mod improved_macros;  // New module
-pub mod macros_tests;
+// Core modules
 pub mod sync;
+pub mod marker_traits;
+pub mod errors;
+
+// Conditional modules
+#[cfg(feature = "async")]
+pub mod async_node;
+
+// Macros
+pub mod macros;
+pub mod improved_macros;
+pub mod macros_tests;
+
+// MCP integration
+#[cfg(feature = "mcp")]
 pub mod mcp;
 
 // Re-export common types for convenience
-pub use async_node::{AsyncFlow, AsyncNode, AsyncNodeImpl};
 pub use sync::{
     node, then, when, Action, BaseNode, ConditionalTransition, Flow, Node, NodeRef, NodeResult,
     Params, Shared, SyncNode,
 };
 
+pub use marker_traits::{SyncContext, AsyncContext};
+pub use errors::{FlowError, FlowResult};
+
+#[cfg(feature = "async")]
+pub use async_node::{AsyncFlow, AsyncNode, AsyncNodeImpl};
+
 // Note: Macros defined with #[macro_export] are automatically available at crate root
 // The following macros are available: node_impl, flow, decision_node, processing_chain
+// And the improved versions: create_node, sequential_flow, branching_flow, decide, pipeline
 
-// Re-export MCP types
-pub use mcp::{McpConfig, McpNode, mcp_node};
+// Re-export MCP types if enabled
+#[cfg(feature = "mcp")]
+pub use mcp::{McpConfig, McpNode, mcp_node, mcp_node_with_tools};
+
+#[cfg(feature = "mcp")]
 pub use mcp::models::Models;
+
+#[cfg(feature = "mcp")]
 pub use mcp::tools::{Tool, ToolRegistry};
 
-// Re-export improved macros
-// These are automatically available at crate root because of #[macro_export]
+#[cfg(feature = "mcp")]
+pub use mcp::conversation::{ConversationManager, ConversationMessage, ToolCallInfo};
+
+
+```
+
+### ./src/mcp/test.rs
+
+```rust
+//! Tests for MCP integration
+//!
+//! This module contains tests for MCP nodes, tools, and conversation management.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::tools::{Tool, ToolRegistry, string_param};
+    use crate::mcp::conversation::{ConversationManager, ToolCallInfo};
+    use crate::sync::Shared;
+    use anthropic::types::Role;
+    use serde_json::json;
+    
+    #[test]
+    fn test_conversation_manager() {
+        let mut convo = ConversationManager::new();
+        
+        // Add messages
+        convo.add_user_message("Hello");
+        convo.add_assistant_message("Hi there!");
+        convo.add_user_message("How are you?");
+        
+        // Check conversation state
+        assert_eq!(convo.len(), 3);
+        let messages = convo.get_messages();
+        assert_eq!(messages[0].content, "Hello");
+        assert_eq!(messages[1].content, "Hi there!");
+        assert_eq!(messages[2].content, "How are you?");
+        
+        // Test tuple conversion
+        let tuples = convo.get_messages_as_tuples();
+        assert_eq!(tuples.len(), 3);
+        assert_eq!(tuples[0].0, Role::User);
+        assert_eq!(tuples[0].1, "Hello");
+        
+        // Test trimming
+        convo.trim_to_last(2);
+        assert_eq!(convo.len(), 2);
+        let messages = convo.get_messages();
+        assert_eq!(messages[0].content, "Hi there!");
+        assert_eq!(messages[1].content, "How are you?");
+        
+        // Test JSON conversion
+        let json_val = convo.to_json();
+        assert!(json_val.is_array());
+        assert_eq!(json_val.as_array().unwrap().len(), 2);
+        
+        // Test clearing
+        convo.clear();
+        assert_eq!(convo.len(), 0);
+        assert!(convo.is_empty());
+    }
+    
+    #[test]
+    fn test_tool_handler_state() {
+        // Create a tool with a handler
+        let tool = Tool::new("test_tool", "A test tool", json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The query to process"}
+            },
+            "required": ["query"]
+        })).with_handler(|args| {
+            let query = args.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+                
+            Ok(json!({
+                "result": format!("Processed: {}", query)
+            }))
+        });
+        
+        // Check handler state
+        assert!(tool.handler_available());
+        assert_eq!(tool.handler_state_description(), "available");
+        
+        // Test execution
+        let args = json!({"query": "test query"});
+        let result = tool.execute(args);
+        assert!(result.is_ok());
+        let result_value = result.unwrap();
+        assert_eq!(result_value["result"].as_str().unwrap(), "Processed: test query");
+        
+        // Clone the tool
+        let cloned_tool = tool.clone();
+        
+        // Check handler state of cloned tool
+        assert!(!cloned_tool.handler_available());
+        assert_eq!(cloned_tool.handler_state_description(), "removed during clone");
+        
+        // Try to execute the cloned tool (should fail)
+        let args = json!({"query": "test query"});
+        let result = cloned_tool.execute(args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("removed during cloning"));
+    }
+    
+    #[test]
+    fn test_tool_registry() {
+        // Create a tool registry
+        let mut registry = ToolRegistry::new();
+        
+        // Add a test tool
+        let test_tool = Tool::new(
+            "test_tool",
+            "A test tool",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The query to process"}
+                },
+                "required": ["query"]
+            })
+        ).with_handler(|args| {
+            let query = args.get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+                
+            Ok(json!({
+                "result": format!("Processed: {}", query)
+            }))
+        });
+        
+        registry.register(test_tool);
+        
+        // Test tool execution
+        let args = json!({"query": "test query"});
+        let result = registry.process_tool_call("test_tool", args);
+        
+        assert_eq!(result["result"], "Processed: test query");
+        
+        // Test non-existent tool
+        let result = registry.process_tool_call("nonexistent_tool", json!({}));
+        assert!(result.get("error").is_some());
+        assert!(result["error"].as_str().unwrap().contains("Tool not found"));
+        
+        // Test tool declarations
+        let declarations = registry.to_tool_declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0]["name"], "test_tool");
+        assert_eq!(declarations[0]["description"], "A test tool");
+    }
+    
+    // For tests that require mocking the Anthropic API, you would use a
+    // crate like mockito. Those tests would be feature-gated and implemented
+    // in separate test modules with the appropriate setup.
+}
+
+```
+
+### ./src/mcp/conversation.rs
+
+```rust
+//! Conversation management for MCP nodes
+//!
+//! This module provides structures for managing conversations with MCP models,
+//! including message history, tool calls, and serialization/deserialization.
+
+use anthropic::types::Role;
+use std::time::{SystemTime, UNIX_EPOCH};
+use serde::{Serialize, Deserialize};
+use serde_json::Value;
+use std::collections::VecDeque;
+
+/// Represents a message in a conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    /// The role of the message sender (as string to avoid serde issues)
+    pub role: Role,
+    /// The content of the message
+    pub content: String,
+    /// The timestamp when the message was created (as Unix timestamp)
+    pub timestamp: u64,
+    /// Optional tool call information
+    pub tool_call: Option<ToolCallInfo>,
+}
+
+/// Information about a tool call
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallInfo {
+    /// The name of the tool
+    pub tool_name: String,
+    /// The arguments passed to the tool
+    pub arguments: Value,
+    /// The result of the tool call
+    pub result: Option<Value>,
+}
+
+/// Manages a conversation with an MCP model
+#[derive(Debug, Clone)]
+pub struct ConversationManager {
+    /// The messages in the conversation
+    messages: VecDeque<ConversationMessage>,
+    /// The maximum number of messages to keep
+    max_messages: Option<usize>,
+}
+
+impl Default for ConversationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConversationManager {
+    /// Create a new conversation manager
+    pub fn new() -> Self {
+        ConversationManager {
+            messages: VecDeque::new(),
+            max_messages: None,
+        }
+    }
+    
+    /// Set the maximum number of messages to keep
+    pub fn with_max_messages(mut self, max: usize) -> Self {
+        self.max_messages = Some(max);
+        self
+    }
+    
+    /// Add a user message to the conversation
+    pub fn add_user_message(&mut self, content: impl Into<String>) {
+        self.add_message(Role::User, content.into(), None);
+    }
+    
+    /// Add an assistant message to the conversation
+    pub fn add_assistant_message(&mut self, content: impl Into<String>) {
+        self.add_message(Role::Assistant, content.into(), None);
+    }
+    
+    /// Add a message with a tool call
+    pub fn add_tool_call(&mut self, content: impl Into<String>, tool_info: ToolCallInfo) {
+        self.add_message(Role::Assistant, content.into(), Some(tool_info));
+    }
+    
+    /// Add a message to the conversation
+    fn add_message(&mut self, role: Role, content: String, tool_call: Option<ToolCallInfo>) {
+        // Get current timestamp in seconds since UNIX epoch
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
+        let message = ConversationMessage {
+            role,
+            content,
+            timestamp,
+            tool_call,
+        };
+        
+        self.messages.push_back(message);
+        
+        // Enforce maximum messages if set
+        if let Some(max) = self.max_messages {
+            while self.messages.len() > max {
+                self.messages.pop_front();
+            }
+        }
+    }
+    
+    /// Get all messages in the conversation
+    pub fn get_messages(&self) -> Vec<&ConversationMessage> {
+        self.messages.iter().collect()
+    }
+    
+    /// Get messages as (Role, String) tuples for the MCP API
+    pub fn get_messages_as_tuples(&self) -> Vec<(Role, String)> {
+        self.messages.iter()
+            .map(|msg| (msg.role, msg.content.clone()))
+            .collect()
+    }
+    
+    /// Clear all messages from the conversation
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+    
+    /// Get the last n messages
+    pub fn get_last_messages(&self, n: usize) -> Vec<&ConversationMessage> {
+        self.messages.iter().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+    }
+    
+    /// Trim the conversation to the last n messages
+    pub fn trim_to_last(&mut self, n: usize) {
+        while self.messages.len() > n {
+            self.messages.pop_front();
+        }
+    }
+    
+    /// Convert the conversation to a JSON value
+    pub fn to_json(&self) -> Value {
+        serde_json::to_value(&self.messages).unwrap_or(Value::Null)
+    }
+    
+    /// Create a conversation from a JSON value
+    pub fn from_json(json: &Value) -> Result<Self, String> {
+        if let Some(messages) = json.as_array() {
+            let mut manager = ConversationManager::new();
+            
+            for msg in messages {
+                if let (Some(role_str), Some(content)) = (
+                    msg.get("role").and_then(|r| r.as_str()),
+                    msg.get("content").and_then(|c| c.as_str())
+                ) {
+                    let role = match role_str {
+                        "user" => Role::User,
+                        "assistant" => Role::Assistant,
+                        _ => continue,
+                    };
+                    
+                    let tool_call = msg.get("tool_call").and_then(|tc| {
+                        if tc.is_null() {
+                            None
+                        } else {
+                            let tool_name = tc.get("tool_name")?.as_str()?;
+                            let arguments = tc.get("arguments")?;
+                            
+                            Some(ToolCallInfo {
+                                tool_name: tool_name.to_string(),
+                                arguments: arguments.clone(),
+                                result: tc.get("result").cloned(),
+                            })
+                        }
+                    });
+                    
+                    // Parse timestamp or use current time
+                    let timestamp = msg.get("timestamp")
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or_else(|| {
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                        });
+                    
+                    // Manually create the message to avoid timestamp issues
+                    let message = ConversationMessage {
+                        role,
+                        content: content.to_string(),
+                        timestamp,
+                        tool_call,
+                    };
+                    
+                    manager.messages.push_back(message);
+                }
+            }
+            
+            Ok(manager)
+        } else {
+            Err("Expected an array of messages".to_string())
+        }
+    }
+    
+    /// Get the number of messages in the conversation
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+    
+    /// Check if the conversation is empty
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
 
 
 ```
@@ -32,7 +422,13 @@ pub use mcp::tools::{Tool, ToolRegistry};
 ### ./src/mcp/tools.rs
 
 ```rust
+//! Tool functionality for MCP nodes
+//!
+//! This module provides the `Tool` and `ToolRegistry` types for creating and
+//! managing tools that can be called by MCP models.
+
 use std::collections::HashMap;
+use tracing::{debug, warn, error};
 use serde::{Serialize, Deserialize};
 use serde_json::{Value, json};
 
@@ -45,9 +441,35 @@ pub struct Tool {
     pub description: String,
     /// The parameters the tool accepts in JSON Schema format
     pub parameters: Value,
-    /// The function to execute when the tool is called
+    /// The handler state
     #[serde(skip)]
-    pub handler: Option<ToolHandler>,
+    handler_state: HandlerState,
+}
+
+/// State of the tool handler
+enum HandlerState {
+    /// Handler is available
+    Present(ToolHandler),
+    /// Handler was never set
+    None,
+    /// Handler was removed during clone
+    RemovedDuringClone,
+}
+
+impl std::fmt::Debug for HandlerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandlerState::Present(_) => write!(f, "Present(...)"),
+            HandlerState::None => write!(f, "None"),
+            HandlerState::RemovedDuringClone => write!(f, "RemovedDuringClone"),
+        }
+    }
+}
+
+impl Default for HandlerState {
+    fn default() -> Self {
+        HandlerState::None
+    }
 }
 
 impl std::fmt::Debug for Tool {
@@ -56,7 +478,7 @@ impl std::fmt::Debug for Tool {
             .field("name", &self.name)
             .field("description", &self.description)
             .field("parameters", &self.parameters)
-            .field("handler", &self.handler.is_some())
+            .field("handler_available", &self.handler_available())
             .finish()
     }
 }
@@ -71,7 +493,7 @@ impl Clone for Tool {
             name: self.name.clone(),
             description: self.description.clone(),
             parameters: self.parameters.clone(),
-            handler: None,
+            handler_state: HandlerState::RemovedDuringClone,
         }
     }
 }
@@ -82,7 +504,7 @@ impl Tool {
             name: name.into(),
             description: description.into(),
             parameters,
-            handler: None,
+            handler_state: HandlerState::None,
         }
     }
 
@@ -90,11 +512,25 @@ impl Tool {
     where
         F: Fn(Value) -> Result<Value, String> + Send + Sync + 'static,
     {
-        self.handler = Some(Box::new(handler));
+        self.handler_state = HandlerState::Present(Box::new(handler));
         self
     }
+    
+    /// Check if the tool has a handler available
+    pub fn handler_available(&self) -> bool {
+        matches!(self.handler_state, HandlerState::Present(_))
+    }
+    
+    /// Get handler state description
+    pub fn handler_state_description(&self) -> &'static str {
+        match self.handler_state {
+            HandlerState::Present(_) => "available",
+            HandlerState::None => "not set",
+            HandlerState::RemovedDuringClone => "removed during clone",
+        }
+    }
 
-    /// Convert to Anthropic's tool format
+    /// Convert to API function declaration format
     pub fn to_function_declaration(&self) -> Value {
         json!({
             "name": self.name,
@@ -105,9 +541,26 @@ impl Tool {
 
     /// Execute the tool with the given arguments
     pub fn execute(&self, args: Value) -> Result<Value, String> {
-        match &self.handler {
-            Some(handler) => handler(args),
-            None => Err(format!("No handler defined for tool {}", self.name)),
+        match &self.handler_state {
+            HandlerState::Present(handler) => {
+                debug!(target: "rpocketflow::mcp::tools", tool = %self.name, "Executing tool");
+                handler(args)
+            },
+            HandlerState::None => {
+                error!(target: "rpocketflow::mcp::tools", tool = %self.name, "No handler defined for tool");
+                Err(format!("No handler defined for tool {}", self.name))
+            },
+            HandlerState::RemovedDuringClone => {
+                error!(
+                    target: "rpocketflow::mcp::tools", 
+                    tool = %self.name,
+                    "Handler was removed during cloning"
+                );
+                Err(format!(
+                    "Handler for tool {} was removed during cloning. Use original tool instance for execution.", 
+                    self.name
+                ))
+            },
         }
     }
 }
@@ -115,6 +568,12 @@ impl Tool {
 /// A registry of tools that can be used in an MCP conversation
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ToolRegistry {
@@ -125,6 +584,15 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Tool) {
+        if !tool.handler_available() {
+            warn!(
+                target: "rpocketflow::mcp::tools",
+                tool = %tool.name,
+                handler_state = %tool.handler_state_description(),
+                "Registering tool without available handler"
+            );
+        }
+        
         self.tools.insert(tool.name.clone(), tool);
     }
 
@@ -144,19 +612,64 @@ impl ToolRegistry {
 
     /// Process tool calls from a model response
     pub fn process_tool_call(&self, name: &str, args: Value) -> Value {
+        debug!(
+            target: "rpocketflow::mcp::tools",
+            tool = %name,
+            "Processing tool call"
+        );
+        
         // Try to execute the function
         let result = match self.get(name) {
-            Some(tool) => tool.execute(args.clone()),
-            None => Err(format!("Tool not found: {}", name)),
+            Some(tool) => {
+                if tool.handler_available() {
+                    tool.execute(args.clone())
+                } else {
+                    error!(
+                        target: "rpocketflow::mcp::tools",
+                        tool = %name,
+                        handler_state = %tool.handler_state_description(),
+                        "Tool found but handler not available"
+                    );
+                    Err(format!(
+                        "Tool handler not available: {} ({})", 
+                        name, 
+                        tool.handler_state_description()
+                    ))
+                }
+            },
+            None => {
+                error!(
+                    target: "rpocketflow::mcp::tools",
+                    tool = %name,
+                    "Tool not found"
+                );
+                Err(format!("Tool not found: {}", name))
+            },
         };
         
         // Convert the result to a response
         match result {
             Ok(value) => match serde_json::to_value(value) {
                 Ok(val) => val,
-                Err(_) => json!({"error": "Failed to serialize result"})
+                Err(e) => {
+                    error!(
+                        target: "rpocketflow::mcp::tools",
+                        tool = %name,
+                        error = %e,
+                        "Failed to serialize result"
+                    );
+                    json!({"error": format!("Failed to serialize result: {}", e)})
+                }
             },
-            Err(e) => json!({"error": e}),
+            Err(e) => {
+                error!(
+                    target: "rpocketflow::mcp::tools",
+                    tool = %name,
+                    error = %e,
+                    "Tool execution failed"
+                );
+                json!({"error": e})
+            },
         }
     }
 }
@@ -193,11 +706,608 @@ pub fn object_param(description: &str, properties: HashMap<&str, Value>) -> Valu
         "properties": properties
     })
 }
+
+
+```
+
+### ./src/mcp/protocol.rs
+
+```rust
+#![allow(unused)]
+use async_trait::async_trait;
+use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc; // Keep Arc for AsyncNodeRef creation
+use tokio::sync::mpsc;
+
+use crate::async_node::AsyncNode;
+use crate::async_node::EMPTY_ASYNC_SUCCESSORS; // Import static empty map
+use crate::errors::{FlowError, FlowResult};
+use crate::sync::{BaseNode, Node, NodeRef, NodeResult, Params, Shared, SyncNode};
+use crate::sync::types::AsyncNodeRef; // Import AsyncNodeRef type
+
+// Helper function to create server connection errors
+fn server_conn_error(msg: &str) -> FlowError {
+    FlowError::MCPServer(msg.to_string())
+}
+
+/// Configuration for an MCP client node
+#[derive(Clone)]
+pub struct MCPClientConfig {
+    /// Optional server name to connect to
+    pub server_name: Option<String>,
+    /// Optional server command to launch
+    pub server_command: Option<String>,
+    /// Optional server arguments
+    pub server_args: Vec<String>,
+    /// Optional client name to identify with
+    pub client_name: String,
+    /// Optional client version
+    pub client_version: String,
+}
+
+impl Default for MCPClientConfig {
+    fn default() -> Self {
+        MCPClientConfig {
+            server_name: None,
+            server_command: None,
+            server_args: Vec::new(),
+            client_name: "RPocketFlow MCP Client".to_string(),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+impl MCPClientConfig {
+    pub fn new(client_name: impl Into<String>, client_version: impl Into<String>) -> Self {
+        MCPClientConfig {
+            server_name: None,
+            server_command: None,
+            server_args: Vec::new(),
+            client_name: client_name.into(),
+            client_version: client_version.into(),
+        }
+    }
+
+    pub fn with_server_name(mut self, server_name: impl Into<String>) -> Self {
+        self.server_name = Some(server_name.into());
+        self
+    }
+
+    pub fn with_server_command(mut self, command: impl Into<String>, args: Vec<String>) -> Self {
+        self.server_command = Some(command.into());
+        self.server_args = args;
+        self
+    }
+}
+
+/// Type representing an MCP client result
+pub type MCPClientResult<T> = crate::errors::FlowResult<T>;
+
+/// A struct to handle communication with the MCP server process
+struct MCPConnection {
+    stdin_tx: mpsc::Sender<String>,
+    stdout_rx: mpsc::Receiver<String>,
+}
+
+// The struct is not Clone, but we'll provide methods to share it safely
+impl MCPConnection {
+    /// Create a new MCPConnection with the given server command and arguments
+    async fn new(command: &str, args: &[String]) -> crate::errors::FlowResult<(Self, Child)> {
+        use crate::errors::FlowError;
+        
+        // Start the server process
+        let mut child = Command::new(command)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| FlowError::MCPServer(format!("Failed to start MCP server process: {}", e)))?;
+
+        // Get stdin and stdout
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| FlowError::MCPServer("Failed to open stdin".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| FlowError::MCPServer("Failed to open stdout".to_string()))?;
+
+        // Create channels for communication
+        let (stdin_tx, mut stdin_rx) = mpsc::channel(10);
+        let (stdout_tx, stdout_rx) = mpsc::channel(10);
+
+        // Spawn a task to handle stdin
+        let _stdin_handle = tokio::spawn(async move {
+            let mut stdin = stdin;
+            while let Some(message) = stdin_rx.recv().await {
+                if let Err(e) = writeln!(stdin, "{}", message) {
+                    eprintln!("Failed to write to stdin: {}", e);
+                    break;
+                }
+                if let Err(e) = stdin.flush() {
+                    eprintln!("Failed to flush stdin: {}", e);
+                    break;
+                }
+            }
+        });
+
+        // Spawn a task to handle stdout
+        let _stdout_handle = tokio::spawn(async move {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            while let Some(Ok(line)) = lines.next() {
+                if let Err(e) = stdout_tx.send(line).await {
+                    eprintln!("Failed to send stdout line: {}", e);
+                    break;
+                }
+            }
+        });
+
+        let connection = MCPConnection {
+            stdin_tx,
+            stdout_rx,
+        };
+
+        Ok((connection, child))
+    }
+
+    /// Clone the sender to allow multiple references to communicate with the server
+    fn clone_sender(&self) -> mpsc::Sender<String> {
+        self.stdin_tx.clone()
+    }
+
+    /// Send a message to the server
+    async fn send(&self, message: &Value) -> Result<(), String> {
+        let json_str = serde_json::to_string(message)
+            .map_err(|e| format!("Failed to serialize message: {}", e))?;
+
+        self.stdin_tx
+            .send(json_str)
+            .await
+            .map_err(|e| format!("Failed to send message: {}", e))
+    }
+
+    /// Receive a message from the server
+    async fn receive<T: for<'de> Deserialize<'de>>(&mut self) -> Result<T, String> {
+        let json_str = self
+            .stdout_rx
+            .recv()
+            .await
+            .ok_or_else(|| "Connection closed".to_string())?;
+
+        serde_json::from_str(&json_str)
+            .map_err(|e| format!("Failed to deserialize response: {}", e))
+    }
+}
+
+/// A node that implements the MCP client protocol
+pub struct MCPProtocolNode {
+    base: BaseNode,
+    config: MCPClientConfig,
+    connection: Option<MCPConnection>,
+    child_process: Option<Child>,
+    available_tools: HashMap<String, String>, // tool_name -> description
+    last_result: Option<Value>,
+    next_id: u64,
+}
+
+impl MCPProtocolNode {
+    pub fn new(name: impl Into<String>, config: MCPClientConfig) -> Self {
+        MCPProtocolNode {
+            base: BaseNode::new(name),
+            config,
+            connection: None,
+            child_process: None,
+            available_tools: HashMap::new(),
+            last_result: None,
+            next_id: 1,
+        }
+    }
+
+    /// Initialize the MCP client
+    pub async fn initialize(&mut self) -> MCPClientResult<Value> {
+        // Check if we have a server command to launch
+        if let Some(command) = &self.config.server_command {
+            // Launch the server process and create a connection
+            let (connection, child) = MCPConnection::new(command, &self.config.server_args).await?;
+
+            self.connection = Some(connection);
+            self.child_process = Some(child);
+
+            info!("Started MCP server process");
+        } else {
+            return Err(crate::errors::FlowError::MCPServer("No server command specified".to_string()));
+        }
+
+        // Prepare initialization message
+        let init_request = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": "initialize",
+            "params": {
+                "clientName": self.config.client_name,
+                "clientVersion": self.config.client_version,
+                "capabilities": {}
+            }
+        });
+        self.next_id += 1;
+
+        // Send initialization request
+        if let Some(conn) = &self.connection {
+            conn.send(&init_request).await?;
+        } else {
+            return Err(crate::errors::FlowError::MCPServer("No connection to MCP server".to_string()));
+        }
+
+        // Receive the response
+        let response: Value = if let Some(conn) = &mut self.connection {
+            conn.receive().await?
+        } else {
+            return Err(server_conn_error("No connection to MCP server"));
+        };
+
+        // Extract and parse the result
+        if let Some(result) = response.get("result") {
+            // Parse server info from the response
+            if let Some(server_info) = result.get("serverInfo") {
+                if let (Some(name), Some(version)) = (
+                    server_info.get("name").and_then(|v| v.as_str()),
+                    server_info.get("version").and_then(|v| v.as_str()),
+                ) {
+                    let protocol_version = result
+                        .get("protocolVersion")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    info!(
+                        "Connected to MCP server: {} v{} (protocol {})",
+                        name, version, protocol_version
+                    );
+                }
+            }
+
+            Ok(result.clone())
+        } else if let Some(error) = response.get("error") {
+            Err(FlowError::Protocol(format!("Initialization error: {}", error)))
+        } else {
+            Err(FlowError::Protocol("Invalid response format".to_string()))
+        }
+    }
+
+    /// Shutdown the MCP client
+    pub async fn shutdown(&mut self) -> MCPClientResult<()> {
+        // Prepare shutdown message
+        let shutdown_request = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": "shutdown",
+            "params": {}
+        });
+        self.next_id += 1;
+
+        // Send shutdown request
+        if let Some(conn) = &self.connection {
+            // Don't propagate errors here, we want to clean up regardless
+            let _ = conn.send(&shutdown_request).await;
+        }
+
+        // Kill the child process if it exists
+        if let Some(mut child) = self.child_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        // Clear the connection
+        self.connection = None;
+
+        Ok(())
+    }
+
+    /// Call a tool on the MCP server
+    pub async fn call_tool<P: Serialize, R: for<'de> Deserialize<'de>>(
+        &mut self,
+        tool_name: &str,
+        params: &P,
+    ) -> MCPClientResult<R> {
+        // Prepare tool call request
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": tool_name,
+            "params": params
+        });
+        self.next_id += 1;
+
+        // Send the request
+        if let Some(conn) = &self.connection {
+            conn.send(&request).await?;
+        } else {
+            return Err(crate::errors::FlowError::MCPServer("No connection to MCP server".to_string()));
+        }
+
+        // Receive the response
+        let response: Value = if let Some(conn) = &mut self.connection {
+            conn.receive().await?
+        } else {
+            return Err(server_conn_error("No connection to MCP server"));
+        };
+
+        // Extract and parse the result
+        if let Some(result) = response.get("result") {
+            serde_json::from_value(result.clone())
+                .map_err(|e| FlowError::Protocol(format!("Failed to parse result: {}", e)))
+        } else if let Some(error) = response.get("error") {
+            Err(FlowError::Protocol(format!("Tool call error: {}", error)))
+        } else {
+            Err(FlowError::Protocol("Invalid response format".to_string()))
+        }
+    }
+
+    /// Get available tools from the server
+    pub async fn get_available_tools(&mut self) -> MCPClientResult<HashMap<String, String>> {
+        let tools_result = self.call_tool::<_, Value>("tools/list", &json!({})).await?;
+
+        let mut tool_map = HashMap::new();
+
+        if let Some(tools) = tools_result.get("tools").and_then(|t| t.as_array()) {
+            for tool in tools {
+                if let (Some(name), Some(description)) = (
+                    tool.get("name").and_then(|n| n.as_str()),
+                    tool.get("description").and_then(|d| d.as_str()),
+                ) {
+                    tool_map.insert(name.to_string(), description.to_string());
+                }
+            }
+        }
+
+        // Store the tools in our instance
+        self.available_tools = tool_map.clone();
+
+        Ok(tool_map)
+    }
+}
+
+impl Drop for MCPProtocolNode {
+    fn drop(&mut self) {
+        // Make sure we terminate the child process when the node is dropped
+        if let Some(mut child) = self.child_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+// MCPProtocolNode is already Send and Sync:
+// - BaseNode is Send + Sync
+// - MCPClientConfig is Clone and all fields are Send + Sync
+// - Option<T> is Send + Sync if T is Send + Sync
+// - Child is explicitly Send + Sync (documented in std)
+// - HashMap<String, String> is Send + Sync
+// - u64 is Send + Sync
+// The manual impls are not needed
+
+impl Node for MCPProtocolNode {
+    fn get_params(&self) -> &Params {
+        &self.base.params
+    }
+
+    fn set_params(&mut self, params: Params) {
+        self.base.params = params;
+    }
+
+    fn add_successor(&mut self, action: String, successor: NodeRef) {
+        self.base.add_successor(action, successor);
+    }
+
+    fn get_successors(&self) -> &HashMap<String, NodeRef> {
+        &self.base.successors
+    }
+
+    fn get_successors_mut(&mut self) -> &mut HashMap<String, NodeRef> {
+        &mut self.base.successors
+    }
+
+    fn get_name(&self) -> &str {
+        &self.base.name
+    }
+}
+
+impl SyncNode for MCPProtocolNode {}
+
+#[async_trait]
+impl AsyncNode for MCPProtocolNode {
+    async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
+        // If tool_name is specified in prep_res, call that tool
+        let tool_name = prep_res
+            .get("tool_name")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| "No tool_name specified in prep_res".to_string())?;
+
+        let params = prep_res.get("params").cloned().unwrap_or_else(|| json!({}));
+
+        debug!("Calling MCP tool: {} with params: {}", tool_name, params);
+
+        // Call the tool and get the result
+        match self.call_tool::<_, Value>(tool_name, &params).await {
+            Ok(result) => {
+                self.last_result = Some(result.clone());
+                Ok(json!({
+                    "tool_name": tool_name,
+                    "result": result,
+                    "status": "success"
+                }))
+            }
+            Err(e) => {
+                error!("Error calling MCP tool {}: {}", tool_name, e);
+                Ok(json!({
+                    "tool_name": tool_name,
+                    "error": e,
+                    "status": "error"
+                }))
+            }
+        }
+    }
+
+    async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
+        // Check if the client needs to be initialized
+        if self.connection.is_none() {
+            match self.initialize().await {
+                Ok(init_result) => {
+                    // Get available tools
+                    if let Ok(tools) = self.get_available_tools().await {
+                        info!("Available MCP tools:");
+                        for (name, description) in &tools {
+                            info!("  - {} - {}", name, description);
+                        }
+
+                        // Store tools in shared state
+                        shared.insert("mcp_tools".to_string(), json!(tools));
+                    }
+
+                    // Store initialization result in shared state
+                    shared.insert("mcp_init_result".to_string(), init_result);
+                }
+                Err(e) => {
+                    return Err(crate::errors::FlowError::MCPClient(format!("Failed to initialize MCP client: {}", e)));
+                }
+            }
+        }
+
+        // Check if we have a tool to call
+        let mut tool_name = None;
+        let mut params = json!({});
+
+        if let Some(input) = shared.get("mcp_tool_call") {
+            tool_name = input
+                .get("tool_name")
+                .and_then(|t| t.as_str())
+                .map(String::from);
+            params = input.get("params").cloned().unwrap_or_else(|| json!({}));
+        }
+
+        if tool_name.is_none() {
+            if let Some(default_tool) = shared.get("mcp_default_tool").and_then(|t| t.as_str()) {
+                tool_name = Some(default_tool.to_string());
+            }
+        }
+
+        // Return the tool to call and its parameters
+        Ok(json!({
+            "tool_name": tool_name.unwrap_or_else(|| "tools/list".to_string()),
+            "params": params,
+        }))
+    }
+
+    async fn post_async(
+        &mut self,
+        shared: &mut Shared,
+        _prep_res: &Value,
+        exec_res: &Value,
+    ) -> NodeResult<Value> {
+        // Store the most recent result in shared state
+        shared.insert("mcp_exec_result".to_string(), exec_res.clone());
+
+        // Determine the next action based on the result
+        let status = exec_res
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown");
+
+        if status == "success" {
+            Ok(json!("success"))
+        } else {
+            Ok(json!("error"))
+        }
+    }
+    
+    // Add required async successor methods
+    fn add_async_successor(&mut self, _action: String, _successor: AsyncNodeRef) {
+        // Since MCPProtocolNode doesn't store async successors directly, log a warning
+        log::warn!("MCPProtocolNode '{}' does not support direct async successors; use wrapping structure like AsyncFlow.", self.get_name());
+    }
+
+    fn get_async_successors(&self) -> &HashMap<String, AsyncNodeRef> {
+        // Use the static empty map from once_cell
+        &EMPTY_ASYNC_SUCCESSORS
+    }
+
+    fn get_async_successors_mut(&mut self) -> &mut HashMap<String, AsyncNodeRef> {
+        // This should never be called since we don't store async successors
+        log::warn!("MCPProtocolNode does not support direct mutable access to async successors.");
+        unimplemented!("MCPProtocolNode does not directly manage mutable async successors");
+    }
+}
+
+/// Create a new MCP Protocol node
+pub fn mcp_protocol_node(name: impl Into<String>, config: MCPClientConfig) -> AsyncNodeRef { // Return type is AsyncNodeRef
+    let node = MCPProtocolNode::new(name, config);
+    // Use the async_node helper
+    crate::async_node::async_node(node)
+}
+
+/// Helper function to create an MCP client config for a stdio-based MCP server
+/// 
+/// This simplifies connecting to an MCP server that uses standard input/output
+/// for communication, which is common for local tool integrations.
+/// 
+/// # Arguments
+/// 
+/// * `client_name` - Name of the client application
+/// * `client_version` - Version of the client application
+/// * `server_command` - Path to the MCP server executable
+/// * `server_args` - Optional arguments to pass to the server executable
+/// 
+/// # Example
+/// 
+/// ```
+/// use rpocketflow::*;
+/// use rpocketflow::mcp::mcp_stdio_config;
+/// 
+/// let config = mcp_stdio_config(
+///     "My Application",
+///     "1.0.0",
+///     "./path/to/mcp_server",
+///     &["--arg1", "--arg2"]
+/// );
+/// 
+/// let mcp_node = mcp_protocol_node("MCP", config);
+/// ```
+pub fn mcp_stdio_config<S1, S2, S3, S4>(
+    client_name: S1,
+    client_version: S2,
+    server_command: S3,
+    server_args: &[S4],
+) -> MCPClientConfig 
+where
+    S1: Into<String>,
+    S2: Into<String>,
+    S3: Into<String>,
+    S4: AsRef<str>,
+{
+    let args: Vec<String> = server_args.iter().map(|arg| arg.as_ref().to_string()).collect();
+    
+    MCPClientConfig::new(client_name, client_version)
+        .with_server_command(server_command, args)
+}
+
+
 ```
 
 ### ./src/mcp/models.rs
 
 ```rust
+//! Constants for Anthropic model names
+//! 
+//! This module provides constants for commonly used Claude model names.
+
 /// Constants for common Anthropic model names
 pub struct Models;
 
@@ -210,7 +1320,11 @@ impl Models {
     
     /// Claude 3 Haiku - Fastest model for simple tasks
     pub const CLAUDE_3_HAIKU: &'static str = "claude-3-haiku-20240307";
+    
+    /// Claude 3.5 Sonnet - Upgraded model with improved capabilities
+    pub const CLAUDE_3_5_SONNET: &'static str = "claude-3-5-sonnet-20240620";
 }
+
 ```
 
 ### ./src/mcp/README.md
@@ -351,20 +1465,30 @@ MCP node errors are returned through the standard RPocketFlow error handling mec
 ### ./src/mcp/mod.rs
 
 ```rust
+//! MCP (Model Context Protocol) integration for RPocketFlow
+//!
+//! This module provides integration with Anthropic's Claude models through
+//! the Model Context Protocol, supporting both simple text interactions and
+//! complex tool-based exchanges.
+
+use tracing::{debug, warn, error};
 use anthropic::client::{Client, ClientBuilder};
-use anthropic::types::{Message, MessagesRequest, Role, ContentBlock};
+use anthropic::types::{Message, MessagesRequest, ContentBlock};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use log::{debug, error};
 
 use crate::async_node::AsyncNode;
 use crate::sync::{Node, NodeRef, NodeResult, Params, Shared, BaseNode, SyncNode};
+use crate::mcp::tools::ToolRegistry;
+use crate::mcp::conversation::ConversationManager;
 
 pub mod models;
 pub mod tools;
+pub mod conversation;
 pub mod macros;
+
 #[cfg(test)]
 pub mod tests;
 
@@ -415,7 +1539,8 @@ pub struct McpNode {
     base: BaseNode,
     config: McpConfig,
     client: Client,
-    messages: Vec<(Role, String)>,
+    conversation: ConversationManager,
+    tool_registry: Option<Arc<ToolRegistry>>,
 }
 
 impl McpNode {
@@ -430,30 +1555,51 @@ impl McpNode {
             base: BaseNode::new(name),
             config,
             client,
-            messages: Vec::new(),
+            conversation: ConversationManager::new(),
+            tool_registry: None,
         }
     }
-
-    /// Add a message to the conversation
-    pub fn add_message(&mut self, role: impl Into<String>, content: impl Into<String>) {
-        let role_str = role.into();
-        let role = match role_str.as_str() {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            _ => Role::User, // Default to user for unknown roles
-        };
-        
-        self.messages.push((role, content.into()));
+    
+    /// Add a tool registry for function calling
+    pub fn with_tool_registry(mut self, registry: ToolRegistry) -> Self {
+        self.tool_registry = Some(Arc::new(registry));
+        self
     }
-
-    /// Get the current conversation
-    pub fn get_messages(&self) -> &Vec<(Role, String)> {
-        &self.messages
+    
+    /// Set a tool registry for function calling
+    pub fn set_tool_registry(&mut self, registry: ToolRegistry) {
+        self.tool_registry = Some(Arc::new(registry));
     }
-
+    
+    /// Get reference to the tool registry, if available
+    pub fn get_tool_registry(&self) -> Option<&Arc<ToolRegistry>> {
+        self.tool_registry.as_ref()
+    }
+    
+    /// Set max conversation length
+    pub fn with_max_conversation_length(mut self, max: usize) -> Self {
+        self.conversation = self.conversation.with_max_messages(max);
+        self
+    }
+    
+    /// Add a user message to the conversation
+    pub fn add_user_message(&mut self, content: impl Into<String>) {
+        self.conversation.add_user_message(content);
+    }
+    
+    /// Add an assistant message to the conversation
+    pub fn add_assistant_message(&mut self, content: impl Into<String>) {
+        self.conversation.add_assistant_message(content);
+    }
+    
+    /// Get the conversation manager
+    pub fn get_conversation(&self) -> &ConversationManager {
+        &self.conversation
+    }
+    
     /// Clear the conversation
-    pub fn clear_messages(&mut self) {
-        self.messages.clear();
+    pub fn clear_conversation(&mut self) {
+        self.conversation.clear();
     }
     
     /// Extract text from a response
@@ -501,24 +1647,25 @@ impl SyncNode for McpNode {}
 #[async_trait]
 impl AsyncNode for McpNode {
     async fn exec_async(&mut self, _prep_res: &Value) -> NodeResult<Value> {
-        // Create message objects from stored messages
-        let mut api_messages = Vec::new();
-        for (role, content) in &self.messages {
-            api_messages.push(Message {
-                role: *role,
-                content: vec![ContentBlock::Text { 
-                    text: content.clone(),
-                }],
-            });
-        }
+        // Create message objects from conversation manager
+        let api_messages = self.conversation.get_messages_as_tuples().iter()
+            .map(|(role, content)| {
+                Message {
+                    role: *role,
+                    content: vec![ContentBlock::Text { 
+                        text: content.clone(),
+                    }],
+                }
+            })
+            .collect::<Vec<_>>();
         
         // Get the system prompt (use empty string if none provided)
         let system = self.config.system_prompt.clone().unwrap_or_else(|| "".to_string());
         
-        // Create the request with all required fields
+        // Create the request
         let request = MessagesRequest {
             messages: api_messages,
-            system: system,
+            system,
             model: self.config.model.clone(),
             max_tokens: self.config.max_tokens.map(|t| t as usize).unwrap_or(1024),
             stop_sequences: Vec::new(),
@@ -527,23 +1674,37 @@ impl AsyncNode for McpNode {
             top_p: None,
             top_k: None,
         };
+
+        // Note: Anthropic API tools integration is handled differently in newer versions
+        // We'll manually check for tool usage in the response content
         
         // Execute the request
         match self.client.messages(request).await {
             Ok(response) => {
-                debug!("MCP response received");
-                let text = Self::extract_text_from_response(&response);
+                debug!(target: "rpocketflow::mcp", "MCP response received");
                 
-                // Store the assistant message in the conversation history
-                self.messages.push((Role::Assistant, text.clone()));
+                // Extract text content
+                let text_content = Self::extract_text_from_response(&response);
+                
+                // Add to conversation history
+                self.conversation.add_assistant_message(text_content.clone());
+                
+                // Note: Anthropic's API currently returns tool calls in a different way
+                // For this version, we'll implement a basic text-based approach
+                // Check if there's a tool call in the text
+                let tool_results: Vec<(String, String, Value, Value)> = Vec::new();
+                
+                // In a real implementation with a newer Anthropic API, we'd parse
+                // tool calls from the response structure
                 
                 Ok(json!({
-                    "text": text,
+                    "text": text_content,
+                    "tool_results": tool_results,
                     "raw_message": json!(response),
                 }))
             },
             Err(e) => {
-                error!("Error from MCP API: {}", e);
+                error!(target: "rpocketflow::mcp", error = %e, "Error from MCP API");
                 Err(format!("MCP API error: {}", e))
             }
         }
@@ -554,26 +1715,43 @@ impl AsyncNode for McpNode {
         if let Some(input) = shared.get("mcp_input") {
             if let Some(input_str) = input.as_str() {
                 // Add user message to the conversation
-                self.add_message("user", input_str);
+                self.conversation.add_user_message(input_str);
             }
         }
         
         // Check if there's conversation history to load
         if let Some(history) = shared.get("mcp_history") {
-            if let Some(history_array) = history.as_array() {
-                for msg in history_array {
-                    let role = msg.get("role")
-                        .ok_or_else(|| "Missing 'role' in history message".to_string())?
-                        .as_str()
-                        .ok_or_else(|| "Role must be a string".to_string())?;
-                    
-                    let content = msg.get("content")
-                        .ok_or_else(|| "Missing 'content' in history message".to_string())?
-                        .as_str()
-                        .ok_or_else(|| "Content must be a string".to_string())?;
-                    
-                    self.add_message(role, content);
+            // Create a new conversation from the history
+            match ConversationManager::from_json(history) {
+                Ok(manager) => {
+                    // Only replace if the imported conversation has messages
+                    if manager.len() > 0 {
+                        self.conversation = manager;
+                    }
+                },
+                Err(e) => {
+                    error!(target: "rpocketflow::mcp", error = %e, "Failed to parse conversation history");
+                    return Err(format!("Failed to parse conversation history: {}", e));
                 }
+            }
+        }
+        
+        // Check if there's a tool registry in the shared state
+        if let Some(tools) = shared.get("mcp_tools") {
+            // Try to extract the tool registry from shared state
+            // This is for backward compatibility with existing code
+            if let Some(tools_obj) = tools.as_object() {
+                warn!(
+                    target: "rpocketflow::mcp",
+                    "Using tool registry from shared state is deprecated. Use McpNode::with_tool_registry instead."
+                );
+                
+                // Log found tools for debugging
+                debug!(
+                    target: "rpocketflow::mcp",
+                    tools = ?tools_obj.keys().collect::<Vec<_>>(),
+                    "Found tools in shared state"
+                );
             }
         }
         
@@ -586,20 +1764,13 @@ impl AsyncNode for McpNode {
             shared.insert("mcp_output".to_string(), text.clone());
         }
         
-        // Update the conversation history in the shared state
-        let messages = self.get_messages().iter().map(|(role, content)| {
-            let role_str = match role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            };
-            
-            json!({
-                "role": role_str,
-                "content": content,
-            })
-        }).collect::<Vec<_>>();
+        // Store tool results if available
+        if let Some(tool_results) = exec_res.get("tool_results") {
+            shared.insert("mcp_tool_results".to_string(), tool_results.clone());
+        }
         
-        shared.insert("mcp_history".to_string(), json!(messages));
+        // Update the conversation history in the shared state
+        shared.insert("mcp_history".to_string(), self.conversation.to_json());
         
         Ok(json!("default"))
     }
@@ -611,101 +1782,157 @@ pub fn mcp_node(name: impl Into<String>, config: McpConfig) -> NodeRef {
     Arc::new(Mutex::new(node))
 }
 
+/// Create a new MCP node with tools
+pub fn mcp_node_with_tools(name: impl Into<String>, config: McpConfig, registry: ToolRegistry) -> NodeRef {
+    let node = McpNode::new(name, config).with_tool_registry(registry);
+    Arc::new(Mutex::new(node))
+}
+
+
 ```
 
 ### ./src/mcp/tests.rs
 
 ```rust
+#![allow(unused)]
 #[cfg(test)]
-mod tests {
-    use crate::*;
+mod mcp_node_tests {
+    use crate::mcp::models::Models;
+    use crate::mcp::{mcp_node, McpConfig};
+    use crate::sync::{Node, Shared, SyncNode};
     use serde_json::json;
-    use anthropic::types::Role;
+    use std::collections::HashMap;
+    use std::env;
 
-    // Helper to create a mock MCP config
-    fn mock_mcp_config() -> McpConfig {
-        McpConfig::new("test-api-key", Models::CLAUDE_3_HAIKU)
-            .with_system_prompt("You are a test assistant.")
+    #[tokio::test]
+    async fn test_mcp_node_creation() {
+        let config = McpConfig::new("test_key", Models::CLAUDE_3_HAIKU)
+            .with_system_prompt("Test prompt")
             .with_max_tokens(100)
-            .with_temperature(0.0)
-    }
+            .with_temperature(0.5);
 
-    #[test]
-    fn test_message_creation() {
-        let mut node = McpNode::new("TestNode", mock_mcp_config());
-        
-        // Add a user message
-        node.add_message("user", "Hello world");
-        
-        // Check that the message was added correctly
-        assert_eq!(node.messages.len(), 1);
-        assert_eq!(node.messages[0].1, "Hello world");
-        assert!(matches!(node.messages[0].0, Role::User));
+        let node = mcp_node("TestNode", config);
+
+        // Verify the node was created with the correct name
+        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
+        assert_eq!(node_ref.get_name(), "TestNode");
     }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use crate::mcp::protocol::{mcp_protocol_node, MCPClientConfig};
+    use crate::sync::{Node, Shared, SyncNode};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_mcp_protocol_node_creation() {
+        let config = MCPClientConfig::new("TestClient", "1.0.0");
+        let node = mcp_protocol_node("TestProtocolNode", config);
+
+        // Verify the node was created with the correct name
+        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
+        assert_eq!(node_ref.get_name(), "TestProtocolNode");
+    }
+}
+
+#[cfg(test)]
+mod tool_registry_tests {
+    use crate::mcp::tools::{string_param, Tool, ToolRegistry};
+    use serde_json::json;
 
     #[test]
     fn test_tool_registry() {
         // Create a tool registry
         let mut registry = ToolRegistry::new();
-        
-        // Add a test tool
+
+        // Create a test tool
         let test_tool = Tool::new(
             "test_tool",
             "A test tool",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The query to process"}
+                    "input": string_param("Test input parameter")
                 },
-                "required": ["query"]
-            })
-        ).with_handler(|args| {
-            let query = args.get("query")
+                "required": ["input"]
+            }),
+        )
+        .with_handler(|args| {
+            let input = args
+                .get("input")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-                
+                .unwrap_or("default");
+
             Ok(json!({
-                "result": format!("Processed: {}", query)
+                "output": format!("Processed: {}", input)
             }))
         });
-        
+
+        // Register the tool
         registry.register(test_tool);
-        
+
+        // Verify tool retrieval
+        let retrieved_tool = registry.get("test_tool").expect("Tool should exist");
+        assert_eq!(retrieved_tool.name, "test_tool");
+        assert_eq!(retrieved_tool.description, "A test tool");
+
         // Test tool execution
-        let args = json!({"query": "test query"});
-        let result = registry.process_tool_call("test_tool", args);
-        
-        assert_eq!(result["result"], "Processed: test query");
+        let result = registry.process_tool_call("test_tool", json!({"input": "test_value"}));
+        assert_eq!(
+            result.get("output").and_then(|v| v.as_str()),
+            Some("Processed: test_value")
+        );
+
+        // Test non-existent tool
+        let error_result = registry.process_tool_call("nonexistent_tool", json!({}));
+        assert!(error_result.get("error").is_some());
     }
 }
+
+
 ```
 
 ### ./src/mcp/macros.rs
 
 ```rust
-/// Create a simple MCP node with minimal configuration requirements.
+//! Macros for simplified MCP integration
+//!
+//! This module provides macros for creating MCP nodes, tools, and flows
+//! with minimal boilerplate.
+
+/// Create an MCP node with minimal configuration requirements.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use rpocketflow::{mcp_simple, Models};
+/// use rpocketflow::{mcp_node, Models};
 /// use std::env;
 ///
 /// // Create a basic MCP node using Claude
 /// let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
-/// let claude = mcp_simple!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
+/// let claude = mcp_node!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
 /// ```
 #[macro_export]
-macro_rules! mcp_simple {
+macro_rules! mcp_node {
     ($name:expr, $api_key:expr, $model:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model);
         mcp_node($name, config)
     }};
     
     ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model)
             .with_system_prompt($system_prompt);
@@ -713,7 +1940,11 @@ macro_rules! mcp_simple {
     }};
     
     ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr, $max_tokens:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model)
             .with_system_prompt($system_prompt)
@@ -722,7 +1953,11 @@ macro_rules! mcp_simple {
     }};
     
     ($name:expr, $api_key:expr, $model:expr, $system_prompt:expr, $max_tokens:expr, $temperature:expr) => {{
-        use $crate::mcp::{McpConfig, mcp_node};
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::{McpConfig, mcp_node};
+        }
+        use __rpf_macro_imports::*;
         
         let config = McpConfig::new($api_key, $model)
             .with_system_prompt($system_prompt)
@@ -758,8 +1993,12 @@ macro_rules! mcp_tool {
     ($name:expr, $description:expr, [
         $(($param_name:expr, $param_desc:expr)),+ $(,)?
     ], $handler:expr) => {{
-        use $crate::mcp::tools::{Tool, string_param};
-        use serde_json::json;
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use serde_json::json;
+            pub use $crate::mcp::tools::{Tool, string_param};
+        }
+        use __rpf_macro_imports::*;
         
         let parameters = json!({
             "type": "object",
@@ -795,8 +2034,12 @@ macro_rules! mcp_flow {
      $(, max_tokens: $max_tokens:expr)?
      $(, temperature: $temp:expr)?
     ) => {{
-        use $crate::{async_flow, create_node, mcp_simple};
-        use serde_json::json;
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::{async_flow, create_node, mcp_node};
+            pub use serde_json::json;
+        }
+        use __rpf_macro_imports::*;
         
         // Create input node
         let input_node = create_node!("InputNode", 
@@ -806,7 +2049,7 @@ macro_rules! mcp_flow {
         );
         
         // Create MCP node
-        let mcp_node = mcp_simple!("McpNode", $api_key, $model, $system
+        let mcp_node = mcp_node!("McpNode", $api_key, $model, $system
             $(, $max_tokens)?
             $(, $temp)?
         );
@@ -828,11 +2071,11 @@ macro_rules! mcp_flow {
 /// # Examples
 ///
 /// ```rust
-/// use rpocketflow::{register_tools, mcp_tool};
+/// use rpocketflow::{mcp_tools, mcp_tool};
 /// use serde_json::json;
 ///
 /// // Create a tool registry with multiple tools
-/// let registry = register_tools! {
+/// let registry = mcp_tools! {
 ///     mcp_tool!("get_weather", "Get weather information", [
 ///         ("location", "City name")
 ///     ], |args| {
@@ -850,9 +2093,13 @@ macro_rules! mcp_flow {
 /// };
 /// ```
 #[macro_export]
-macro_rules! register_tools {
+macro_rules! mcp_tools {
     ($($tool:expr),+ $(,)?) => {{
-        use $crate::mcp::tools::ToolRegistry;
+        // Import dependencies within a separate module to avoid conflicts
+        mod __rpf_macro_imports {
+            pub use $crate::mcp::tools::ToolRegistry;
+        }
+        use __rpf_macro_imports::*;
         
         let mut registry = ToolRegistry::new();
         $(
@@ -862,6 +2109,43 @@ macro_rules! register_tools {
         registry
     }};
 }
+
+```
+
+### ./src/errors.rs
+
+```rust
+//! Error handling for RPocketFlow
+//!
+//! This module provides error types and result aliases for the library.
+
+use thiserror::Error;
+use std::io;
+
+/// Custom error type for RPocketFlow
+#[derive(Debug, Error)]
+pub enum FlowError {
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Node execution error: {0}")]
+    NodeExecution(String),
+
+    #[error("Flow orchestration error: {0}")]
+    FlowOrchestration(String),
+
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+
+    #[error("MCP error: {0}")]
+    Mcp(String),
+}
+
+/// Result type alias for RPocketFlow operations
+pub type FlowResult<T> = Result<T, FlowError>;
 
 
 ```
@@ -902,6 +2186,8 @@ macro_rules! node_impl {
         use std::collections::HashMap;
         use std::time::Duration;
 
+        #[allow(non_camel_case_types)]
+        #[doc(hidden)]
         struct GeneratedNode {
             base: BaseNode,
         }
@@ -955,271 +2241,25 @@ macro_rules! node_impl {
     }}
 }
 
-/// Macro to create a simple flow with connected nodes
-///
-/// # Examples
-///
-/// ```rust
-/// use rpocketflow::flow;
-/// use rpocketflow::node_impl;
-/// use serde_json::Value;
-/// 
-/// // First, create some nodes to use in our flow
-/// let node1 = node_impl! { name: "Node1", exec: |_: &Value| Ok(Value::Null) };
-/// let node2 = node_impl! { name: "Node2", exec: |_: &Value| Ok(Value::Null) };
-/// let node3 = node_impl! { name: "Node3", exec: |_: &Value| Ok(Value::Null) };
-///
-/// // Create a linear flow
-/// let flow = flow! {
-///     name: "SimpleFlow",
-///     nodes: [node1, node2, node3]
-/// };
-/// ```
-///
-/// ```rust
-/// use rpocketflow::flow;
-/// use rpocketflow::node_impl;
-/// use serde_json::Value;
-/// 
-/// // First, create some nodes
-/// let start_node = node_impl! { name: "Start", exec: |_: &Value| Ok(Value::Null) };
-/// let path1_node = node_impl! { name: "Path1", exec: |_: &Value| Ok(Value::Null) };
-/// let path2_node = node_impl! { name: "Path2", exec: |_: &Value| Ok(Value::Null) };
-/// let end_node = node_impl! { name: "End", exec: |_: &Value| Ok(Value::Null) };
-///
-/// // Create a more complex flow with branches
-/// let flow = flow! {
-///     name: "BranchingFlow",
-///     start: start_node.clone(),
-///     connections: [
-///         (start_node.clone(), "path1", path1_node.clone()),
-///         (start_node.clone(), "path2", path2_node.clone()),
-///         (path1_node.clone(), "default", end_node.clone()),
-///         (path2_node.clone(), "default", end_node.clone())
-///     ]
-/// };
-/// ```
-#[macro_export]
-macro_rules! flow {
-    // Simple linear flow
-    (
-        name: $name:expr,
-        nodes: [$first:expr $(, $rest:expr)+]
-    ) => {{
-        use $crate::sync::{Flow, then};
+```
 
-        let first_node = $first;
-        $(
-            let _ = then(&first_node, $rest);
-        )*
+### ./src/marker_traits.rs
 
-        Flow::new($name, first_node)
-    }};
+```rust
+//! Marker traits for execution contexts
+//!
+//! These traits help distinguish between synchronous and asynchronous execution
+//! contexts and enable better type-level guarantees for flow orchestration.
 
-    // Flow with explicit connections
-    (
-        name: $name:expr,
-        start: $start:expr,
-        connections: [$(($from:expr, $action:expr, $to:expr)),+ $(,)?]
-    ) => {{
-        use $crate::sync::{Flow, when};
+/// Marker trait for synchronous execution context
+pub trait SyncContext: Send {}
 
-        let start_node = $start;
-        $(
-            let _ = when(&$from, $action).then($to);
-        )+
+/// Marker trait for asynchronous execution context
+pub trait AsyncContext: Send {}
 
-        Flow::new($name, start_node)
-    }};
-}
-
-/// Macro to create a simple decision node
-///
-/// # Examples
-///
-/// ```rust
-/// use rpocketflow::decision_node;
-/// use rpocketflow::{Params, Shared};
-/// use serde_json::Value;
-/// use std::collections::HashMap;
-///
-/// // Create a decision node based on a condition
-/// let decision_node = decision_node! {
-///     name: "RouteDecision",
-///     condition: |params: &Params, shared: &Shared| {
-///         if let Some(Value::Number(age)) = shared.get("age") {
-///             if age.as_u64().unwrap_or(0) >= 18 {
-///                 "adult".to_string()
-///             } else {
-///                 "minor".to_string()
-///             }
-///         } else {
-///             "unknown".to_string()
-///         }
-///     }
-/// };
-/// ```
-#[macro_export]
-macro_rules! decision_node {
-    (
-        name: $name:expr,
-        condition: $condition:expr
-        $(, max_retries: $retries:expr)?
-        $(, wait_duration: $wait:expr)?
-        $(,)?
-    ) => {{
-        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
-        use serde_json::Value;
-        use std::collections::HashMap;
-        use std::time::Duration;
-
-        struct DecisionNode {
-            base: BaseNode,
-            condition: Box<dyn Fn(&Params, &Shared) -> String + Send>,
-        }
-
-        impl DecisionNode {
-            fn new(
-                name: impl Into<String>,
-                condition: impl Fn(&Params, &Shared) -> String + Send + 'static
-            ) -> Self {
-                let base = BaseNode::new(name);
-                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
-                Self {
-                    base,
-                    condition: Box::new(condition),
-                }
-            }
-        }
-
-        impl Node for DecisionNode {
-            fn get_params(&self) -> &Params { &self.base.get_params() }
-            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
-            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
-                self.base.add_successor(action, successor);
-            }
-            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
-                self.base.get_successors()
-            }
-            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
-                self.base.get_successors_mut()
-            }
-            fn get_name(&self) -> &str { self.base.get_name() }
-            fn get_max_retries(&self) -> usize { self.base.get_max_retries() }
-            fn get_wait_duration(&self) -> Duration { self.base.get_wait_duration() }
-        }
-
-        impl SyncNode for DecisionNode {
-            fn post(&mut self, shared: &mut Shared, _prep_res: &Value, _exec_res: &Value) -> NodeResult<Value> {
-                // Use the condition to determine the next action
-                let decision = (self.condition)(self.get_params(), shared);
-                Ok(Value::String(decision))
-            }
-        }
-
-        $crate::sync::node(DecisionNode::new($name, $condition))
-    }}
-}
-
-/// Macro for creating a simple processing chain
-///
-/// # Examples
-///
-/// ```rust
-/// use rpocketflow::processing_chain;
-/// use rpocketflow::NodeResult;
-/// use serde_json::Value;
-/// 
-/// // Create a chain of processing steps
-/// let processor = processing_chain! {
-///     name: "DataProcessor",
-///     steps: [
-///         |data: &Value| -> NodeResult<Value> { /* transformation 1 */ Ok(data.clone()) },
-///         |data: &Value| -> NodeResult<Value> { /* transformation 2 */ Ok(data.clone()) },
-///         |data: &Value| -> NodeResult<Value> { /* transformation 3 */ Ok(data.clone()) }
-///     ]
-/// };
-/// ```
-#[macro_export]
-macro_rules! processing_chain {
-    (
-        name: $name:expr,
-        steps: [$($step:expr),+ $(,)?]
-        $(, max_retries: $retries:expr)?
-        $(, wait_duration: $wait:expr)?
-        $(,)?
-    ) => {{
-        use $crate::sync::{BaseNode, Node, NodeResult, Params, Shared, SyncNode};
-        use serde_json::Value;
-        use std::collections::HashMap;
-        use std::time::Duration;
-
-        struct ProcessingChain {
-            base: BaseNode,
-            steps: Vec<Box<dyn Fn(&Value) -> NodeResult<Value> + Send>>,
-        }
-
-        impl ProcessingChain {
-            fn new(name: impl Into<String>) -> Self {
-                let base = BaseNode::new(name);
-                let base = base$(.with_max_retries($retries))?$(.with_wait_duration($wait))?;
-                Self {
-                    base,
-                    steps: Vec::new()
-                }
-            }
-
-            fn add_step(&mut self, step: impl Fn(&Value) -> NodeResult<Value> + Send + 'static) {
-                self.steps.push(Box::new(step));
-            }
-        }
-
-        impl Node for ProcessingChain {
-            fn get_params(&self) -> &Params { &self.base.get_params() }
-            fn set_params(&mut self, params: Params) { self.base.set_params(params); }
-            fn add_successor(&mut self, action: String, successor: $crate::sync::NodeRef) {
-                self.base.add_successor(action, successor);
-            }
-            fn get_successors(&self) -> &HashMap<String, $crate::sync::NodeRef> {
-                self.base.get_successors()
-            }
-            fn get_successors_mut(&mut self) -> &mut HashMap<String, $crate::sync::NodeRef> {
-                self.base.get_successors_mut()
-            }
-            fn get_name(&self) -> &str { self.base.get_name() }
-            fn get_max_retries(&self) -> usize { self.base.get_max_retries() }
-            fn get_wait_duration(&self) -> Duration { self.base.get_wait_duration() }
-        }
-
-        impl SyncNode for ProcessingChain {
-            fn prep(&mut self, shared: &mut Shared) -> NodeResult<Value> {
-                // Get input data from shared state
-                if let Some(input) = shared.get("input") {
-                    Ok(input.clone())
-                } else {
-                    Ok(Value::Null)
-                }
-            }
-
-            fn exec(&mut self, prep_res: &Value) -> NodeResult<Value> {
-                let mut current = prep_res.clone();
-
-                for step in &self.steps {
-                    current = step(&current)?;
-                }
-
-                Ok(current)
-            }
-        }
-
-        let mut chain = ProcessingChain::new($name);
-        $(
-            chain.add_step($step);
-        )+
-
-        $crate::sync::node(chain)
-    }}
-}
+// Implement the markers for common types
+impl<T: Send> SyncContext for T {}
+impl<T: Send> AsyncContext for T {}
 
 ```
 
@@ -1227,6 +2267,7 @@ macro_rules! processing_chain {
 
 ```rust
 #![allow(unused)]
+use tracing::{info, warn, error, debug};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::MutexGuard;
@@ -1272,11 +2313,12 @@ impl Flow {
 
         // No successor found
         if !node_guard.get_successors().is_empty() {
-            println!(
-                "Flow ends: action '{}' not found in node '{}'. Available actions: {:?}",
-                action,
-                node_guard.get_name(),
-                node_guard.get_successors().keys().collect::<Vec<_>>()
+            warn!(
+                target: "rpocketflow::sync::flow",
+                flow_action = %action,
+                node = %node_guard.get_name(),
+                available_actions = ?node_guard.get_successors().keys().collect::<Vec<_>>(),
+                "Flow ended: action not found in node"
             );
         }
 
@@ -1297,7 +2339,11 @@ impl Flow {
                 let mut node = match curr.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
-                        println!("Mutex was poisoned. Recovering and continuing.");
+                        error!(
+                            target: "rpocketflow::sync::flow",
+                            node = %poisoned.to_string(),
+                            "Mutex was poisoned. Recovering and continuing."
+                        );
                         poisoned.into_inner()
                     }
                 };
@@ -1307,10 +2353,11 @@ impl Flow {
                 match node._run(shared) {
                     Ok(action) => {
                         if action == Action::Terminate {
-                            println!(
-                                "Flow '{}' terminated by node '{}'",
-                                self.base.name,
-                                node.get_name()
+                            info!(
+                                target: "rpocketflow::sync::flow",
+                                flow = %self.base.name, 
+                                node = %node.get_name(),
+                                "Flow terminated by node"
                             );
                             return Ok(());
                         }
@@ -1326,12 +2373,21 @@ impl Flow {
                             continue;
                         } else {
                             // No successor found, end the flow
-                            println!("Flow '{}' ended naturally", self.base.name);
+                            info!(
+                                target: "rpocketflow::sync::flow",
+                                flow = %self.base.name,
+                                "Flow ended naturally"
+                            );
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("Error in Flow '{}' execution: {}", self.base.name, e);
+                        error!(
+                            target: "rpocketflow::sync::flow",
+                            flow = %self.base.name,
+                            error = %e,
+                            "Error in flow execution"
+                        );
                         return Err(format!("Flow error: {}", e));
                     }
                 }
@@ -1510,6 +2566,7 @@ pub type NodeRef = Arc<Mutex<dyn SyncNode + Send>>;
 /// Type alias for results from node operations
 pub type NodeResult<T> = Result<T, String>;
 
+
 ```
 
 ### ./src/sync/helpers.rs
@@ -1632,6 +2689,7 @@ pub trait Node: Send {
 ### ./src/sync/tests.rs
 
 ```rust
+#![allow(unused)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -1875,15 +2933,17 @@ fn test_termination() {
 ### ./src/sync/sync_node.rs
 
 ```rust
+use tracing::debug;
 use serde_json::Value;
 use std::thread;
 
+use crate::marker_traits::SyncContext;
 use super::action::Action;
 use super::node::Node;
 use super::types::{NodeResult, Shared};
 
 /// Trait for synchronous nodes
-pub trait SyncNode: Node {
+pub trait SyncNode: Node + SyncContext {
     /// Preparation phase - fetches necessary data before execution
     fn prep(&mut self, _shared: &mut Shared) -> NodeResult<Value> {
         Ok(Value::Null)
@@ -1915,21 +2975,22 @@ pub trait SyncNode: Node {
 
         let mut last_error = None;
 
-        for attempt in 0..max_retries {
+        for attempt_idx in 0..max_retries {
             match self.exec(prep_res) {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     last_error = Some(e);
 
-                    if attempt + 1 < max_retries {
+                    if attempt_idx + 1 < max_retries {
                         let wait = self.get_wait_duration();
                         if wait > std::time::Duration::from_secs(0) {
-                            println!(
-                                "Node '{}' execution failed, retrying in {:?} (attempt {}/{})",
-                                self.get_name(),
-                                wait,
-                                attempt + 1,
-                                max_retries
+                            debug!(
+                                target: "rpocketflow::sync::node",
+                                node = %self.get_name(),
+                                attempt = attempt_idx + 1,
+                                max_attempts = max_retries,
+                                wait_duration = ?wait,
+                                "Node execution failed, retrying"
                             );
                             thread::sleep(wait);
                         }
@@ -1957,6 +3018,7 @@ pub trait SyncNode: Node {
         self._run(shared)
     }
 }
+
 
 ```
 
@@ -2026,8 +3088,8 @@ impl Node for BaseNode {
 
     fn add_successor(&mut self, action: String, successor: NodeRef) {
         if self.successors.contains_key(&action) {
-            println!(
-                "Warning: Node '{}': Overwriting successor for action '{}'",
+            log::warn!(
+                "Node '{}': Overwriting successor for action '{}'",
                 self.name, action
             );
         }
@@ -2062,6 +3124,7 @@ impl SyncNode for BaseNode {}
 ### ./src/macros_tests.rs
 
 ```rust
+#![allow(unused)]
 #[cfg(test)]
 mod tests {
     use crate::*;
@@ -2324,7 +3387,7 @@ mod tests {
                     if data.is_object() {
                         Ok(data.clone())
                     } else {
-                        Err("Data must be an object".to_string())
+                        Err(crate::errors::FlowError::NodeExecution("Data must be an object".to_string()))
                     }
                 },
                 // Step 2: Extract value
@@ -2332,7 +3395,7 @@ mod tests {
                     if let Some(value) = data.get("value") {
                         Ok(value.clone())
                     } else {
-                        Err("Missing 'value' field".to_string())
+                        Err(crate::errors::FlowError::NodeExecution("Missing 'value' field".to_string()))
                     }
                 },
                 // Step 3: Double the value if numeric - Explicitly return an integer
@@ -2342,7 +3405,7 @@ mod tests {
                     } else if let Some(num) = data.as_i64() {
                         Ok(json!(num * 2))
                     } else {
-                        Err("Value is not numeric".to_string())
+                        Err(crate::errors::FlowError::NodeExecution("Value is not numeric".to_string()))
                     }
                 }
             ],
@@ -2374,7 +3437,10 @@ mod tests {
 
         // Should fail at step 2
         assert!(exec_result2.is_err());
-        assert!(exec_result2.unwrap_err().contains("Missing 'value' field"));
+        assert!(exec_result2
+            .unwrap_err()
+            .to_string()
+            .contains("Missing 'value' field"));
 
         // Test with non-numeric value
         let mut shared3 = HashMap::new();
@@ -2385,7 +3451,10 @@ mod tests {
 
         // Should fail at step 3
         assert!(exec_result3.is_err());
-        assert!(exec_result3.unwrap_err().contains("Value is not numeric"));
+        assert!(exec_result3
+            .unwrap_err()
+            .to_string()
+            .contains("Value is not numeric"));
     }
 }
 
@@ -2394,6 +3463,12 @@ mod tests {
 ### ./src/improved_macros.rs
 
 ```rust
+//! Enhanced macros for simplified workflow creation
+//!
+//! This module provides improved macros that make it easier to create nodes,
+//! flows, and other workflow components with less boilerplate while maintaining
+//! backward compatibility with the original macros.
+
 /// Creates a node with a more flexible syntax that allows specifying different handlers
 /// with less verbosity than the original node_impl! macro.
 ///
@@ -2505,7 +3580,8 @@ macro_rules! sequential_flow {
 /// // Create some nodes
 /// let start = create_node!("Start", |_| Ok(json!("path_a")));
 /// let path_a = create_node!("PathA", |_| Ok(json!("done")));
-/// let path_b = create_node!("PathB", |_| Ok(json!("done")));
+/// let path_b = create
+/// /// let path_b = create_node!("PathB", |_| Ok(json!("done")));
 /// let end = create_node!("End", |_| Ok(json!("terminate")));
 ///
 /// // Create a branching flow
@@ -2675,13 +3751,14 @@ macro_rules! pipeline {
     };
 }
 
-
 ```
 
 ### ./src/async_node.rs
 
 ```rust
 #![allow(unused)]
+use tracing::{info, warn, error, debug};
+use crate::marker_traits::AsyncContext;
 use crate::sync::{Action, Node, NodeRef, NodeResult, Shared, SyncNode};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -2690,13 +3767,17 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 #[async_trait]
-pub trait AsyncNode: Node {
+pub trait AsyncNode: Node + AsyncContext {
     async fn prep_async(&mut self, shared: &mut Shared) -> NodeResult<Value> {
         Ok(Value::Null)
     }
 
     async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-        println!("AsyncNode exec_async called with prep_res: {}", prep_res);
+        debug!(
+            target: "rpocketflow::async::node",
+            node = %self.get_name(),
+            "AsyncNode exec_async called"
+        );
         Ok(Value::Null)
     }
 
@@ -2715,16 +3796,24 @@ pub trait AsyncNode: Node {
 
     async fn _exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
         let max_retries = self.get_max_retries();
-        for i in 0..max_retries {
+        for attempt_idx in 0..max_retries {
             let res = self.exec_async(prep_res).await;
             match res {
                 Ok(val) => return Ok(val),
                 Err(e) => {
-                    if i == max_retries - 1 {
+                    if attempt_idx == max_retries - 1 {
                         return self.exec_fallback_async(prep_res, e).await;
                     } else {
                         let wait = self.get_wait_duration();
                         if wait > Duration::from_secs(0) {
+                            debug!(
+                                target: "rpocketflow::async::node",
+                                node = %self.get_name(),
+                                attempt = attempt_idx + 1,
+                                max_attempts = max_retries,
+                                wait_duration = ?wait,
+                                "Node execution failed, retrying"
+                            );
                             sleep(wait).await;
                         }
                     }
@@ -2743,7 +3832,11 @@ pub trait AsyncNode: Node {
 
     async fn run_async(&mut self, shared: &mut Shared) -> NodeResult<Action> {
         if !self.get_successors().is_empty() {
-            println!("Warning: Node won't run successors. Use AsyncFlow.");
+            warn!(
+                target: "rpocketflow::async::node",
+                node = %self.get_name(),
+                "Node won't run successors. Use AsyncFlow."
+            );
         }
         self._run_async(shared).await
     }
@@ -2813,9 +3906,10 @@ impl AsyncNode for AsyncNodeImpl {
     }
 
     async fn exec_async(&mut self, prep_res: &Value) -> NodeResult<Value> {
-        println!(
-            "AsyncNodeImpl exec_async called with prep_res: {}",
-            prep_res
+        debug!(
+            target: "rpocketflow::async::node",
+            node = %self.get_name(),
+            "AsyncNodeImpl exec_async called"
         );
         Ok(Value::Null)
     }
@@ -2857,7 +3951,11 @@ impl AsyncFlow {
                 let mut node = match curr.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => {
-                        println!("Mutex was poisoned. Recovering and continuing.");
+                        error!(
+                            target: "rpocketflow::async::flow", 
+                            node = %poisoned.to_string(),
+                            "Mutex was poisoned. Recovering and continuing."
+                        );
                         poisoned.into_inner()
                     }
                 };
@@ -2867,10 +3965,11 @@ impl AsyncFlow {
                 match node._run(shared) {
                     Ok(action) => {
                         if action == Action::Terminate {
-                            println!(
-                                "Flow '{}' terminated by node '{}'",
-                                self.base.get_name(),
-                                node.get_name()
+                            info!(
+                                target: "rpocketflow::async::flow",
+                                flow = %self.base.get_name(),
+                                node = %node.get_name(),
+                                "Flow terminated by node"
                             );
                             return Ok(());
                         }
@@ -2898,12 +3997,21 @@ impl AsyncFlow {
                             continue;
                         } else {
                             // No successor found, end the flow
-                            println!("Flow '{}' ended naturally", self.base.get_name());
+                            info!(
+                                target: "rpocketflow::async::flow",
+                                flow = %self.base.get_name(),
+                                "Flow ended naturally"
+                            );
                             return Ok(());
                         }
                     }
                     Err(e) => {
-                        println!("Error in Flow '{}' execution: {}", self.base.get_name(), e);
+                        error!(
+                            target: "rpocketflow::async::flow",
+                            flow = %self.base.get_name(),
+                            error = %e,
+                            "Error in flow execution"
+                        );
                         return Err(format!("Flow error: {}", e));
                     }
                 }
