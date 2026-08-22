@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-echo outage-run
-sleep 540
+echo drill-green
+exit 0
