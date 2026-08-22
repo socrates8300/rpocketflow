@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-exit 7
+sleep 540
