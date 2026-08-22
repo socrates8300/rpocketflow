@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-echo outage-run
-sleep 540
+echo "judge-p5 distinct flow"
+exit 42
