@@ -57,12 +57,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let decision = decide!("RouteDecision", |_, shared| {
         if let Some(score) = shared.get("score") {
             if score.as_f64().unwrap_or(0.0) > 0.5 {
-                "high_path"
+                "high_path".to_string()
             } else {
-                "low_path"
+                "low_path".to_string()
             }
         } else {
-            "default"
+            "default".to_string()
         }
     });
     

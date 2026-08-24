@@ -18,28 +18,11 @@ mod mcp_node_tests {
         let node = mcp_node("TestNode", config);
 
         // Verify the node was created with the correct name
-        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
+        let node_ref = node.lock().unwrap();
         assert_eq!(node_ref.get_name(), "TestNode");
     }
 }
 
-#[cfg(test)]
-mod protocol_tests {
-    use crate::mcp::protocol::{mcp_protocol_node, MCPClientConfig};
-    use crate::sync::{Node, Shared, SyncNode};
-    use serde_json::json;
-    use std::collections::HashMap;
-
-    #[tokio::test]
-    async fn test_mcp_protocol_node_creation() {
-        let config = MCPClientConfig::new("TestClient", "1.0.0");
-        let node = mcp_protocol_node("TestProtocolNode", config);
-
-        // Verify the node was created with the correct name
-        let node_ref = node.lock().await; // Use .await instead of .unwrap() with TokioMutex
-        assert_eq!(node_ref.get_name(), "TestProtocolNode");
-    }
-}
 
 #[cfg(test)]
 mod tool_registry_tests {

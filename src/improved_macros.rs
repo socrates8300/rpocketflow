@@ -21,15 +21,15 @@
 ///
 /// // Node with prep, exec, and post handlers
 /// let full_node = create_node!("FullNode", 
-///     prep: |shared| {
+///     prep: |shared: &mut std::collections::HashMap<String, serde_json::Value>| {
 ///         shared.insert("prepared".to_string(), json!(true));
 ///         Ok(json!({"data": 42}))
 ///     },
-///     exec: |prep_res| {
+///     exec: |prep_res: &serde_json::Value| {
 ///         let data = prep_res["data"].as_i64().unwrap_or(0);
 ///         Ok(json!(data * 2))
 ///     },
-///     post: |shared, prep_res, exec_res| {
+///     post: |shared: &mut std::collections::HashMap<String, serde_json::Value>, _prep_res: &serde_json::Value, exec_res: &serde_json::Value| {
 ///         shared.insert("result".to_string(), exec_res.clone());
 ///         Ok(json!("next_step"))
 ///     }
@@ -115,8 +115,7 @@ macro_rules! sequential_flow {
 /// // Create some nodes
 /// let start = create_node!("Start", |_| Ok(json!("path_a")));
 /// let path_a = create_node!("PathA", |_| Ok(json!("done")));
-/// let path_b = create
-/// /// let path_b = create_node!("PathB", |_| Ok(json!("done")));
+/// let path_b = create_node!("PathB", |_| Ok(json!("done")));
 /// let end = create_node!("End", |_| Ok(json!("terminate")));
 ///
 /// // Create a branching flow
@@ -182,17 +181,17 @@ macro_rules! async_flow {
 /// use serde_json::json;
 ///
 /// // Create a decision node
-/// let router = decide!("Router", |params, shared| {
+/// let router = decide!("Router", |_params, shared| {
 ///     if let Some(value) = shared.get("direction") {
 ///         if value.as_str() == Some("left") {
-///             "left_path"
+///             "left_path".to_string()
 ///         } else if value.as_str() == Some("right") {
-///             "right_path"
+///             "right_path".to_string()
 ///         } else {
-///             "default"
+///             "default".to_string()
 ///         }
 ///     } else {
-///         "error_path"
+///         "error_path".to_string()
 ///     }
 /// });
 /// ```
@@ -252,10 +251,11 @@ macro_rules! decide {
 ///         Ok(json!(doubled))
 ///     },
 ///     // Step 3: Format as object
-///     |doubled| {
+///     |doubled: &serde_json::Value| {
+///         let d = doubled.as_i64().unwrap_or(0);
 ///         Ok(json!({
-///             "original": doubled / 2,
-///             "result": doubled
+///             "original": d / 2,
+///             "result": d
 ///         }))
 ///     }
 /// );

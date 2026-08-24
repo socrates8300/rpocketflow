@@ -9,11 +9,10 @@
 ///
 /// ```rust
 /// use rpocketflow::{mcp_node, Models};
-/// use std::env;
 ///
-/// // Create a basic MCP node using Claude
-/// let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
-/// let claude = mcp_node!("ClaudeAssistant", api_key, Models::CLAUDE_3_HAIKU);
+/// // Create a basic MCP node using Claude (construction is offline; the key
+/// // is only used when the node runs)
+/// let claude = mcp_node!("ClaudeAssistant", "your-api-key", Models::CLAUDE_3_HAIKU);
 /// ```
 #[macro_export]
 macro_rules! mcp_node {
@@ -120,11 +119,10 @@ macro_rules! mcp_tool {
 ///
 /// ```rust
 /// use rpocketflow::{mcp_flow, Models};
-/// use std::env;
 ///
-/// // Create an MCP conversation flow
-/// let api_key = env::var("ANTHROPIC_API_KEY").expect("API key missing");
-/// let flow = mcp_flow!("ConversationFlow", api_key, Models::CLAUDE_3_SONNET,
+/// // Create an MCP conversation flow (construction is offline; the key
+/// // is only used when the flow runs)
+/// let flow = mcp_flow!("ConversationFlow", "your-api-key", Models::CLAUDE_3_SONNET,
 ///     system: "You are a helpful assistant that provides concise answers."
 /// );
 /// ```

@@ -25,6 +25,7 @@ chrono = { version = "0.4", optional = true }
 walkdir = { version = "2.3", optional = true }
 
 [dev-dependencies]
+tracing-subscriber = "0.3"
 mockito = "1.2"
 tokio-test = "0.4"
 

@@ -261,7 +261,7 @@ mod tests {
                     if data.is_object() {
                         Ok(data.clone())
                     } else {
-                        Err(crate::errors::FlowError::NodeExecution("Data must be an object".to_string()))
+                        Err("Data must be an object".to_string())
                     }
                 },
                 // Step 2: Extract value
@@ -269,7 +269,7 @@ mod tests {
                     if let Some(value) = data.get("value") {
                         Ok(value.clone())
                     } else {
-                        Err(crate::errors::FlowError::NodeExecution("Missing 'value' field".to_string()))
+                        Err("Missing 'value' field".to_string())
                     }
                 },
                 // Step 3: Double the value if numeric - Explicitly return an integer
@@ -279,7 +279,7 @@ mod tests {
                     } else if let Some(num) = data.as_i64() {
                         Ok(json!(num * 2))
                     } else {
-                        Err(crate::errors::FlowError::NodeExecution("Value is not numeric".to_string()))
+                        Err("Value is not numeric".to_string())
                     }
                 }
             ],
@@ -311,10 +311,7 @@ mod tests {
 
         // Should fail at step 2
         assert!(exec_result2.is_err());
-        assert!(exec_result2
-            .unwrap_err()
-            .to_string()
-            .contains("Missing 'value' field"));
+        assert!(exec_result2.unwrap_err().contains("Missing 'value' field"));
 
         // Test with non-numeric value
         let mut shared3 = HashMap::new();
@@ -325,9 +322,6 @@ mod tests {
 
         // Should fail at step 3
         assert!(exec_result3.is_err());
-        assert!(exec_result3
-            .unwrap_err()
-            .to_string()
-            .contains("Value is not numeric"));
+        assert!(exec_result3.unwrap_err().contains("Value is not numeric"));
     }
 }

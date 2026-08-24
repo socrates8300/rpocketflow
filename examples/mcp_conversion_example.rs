@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_node.add_user_message(input);
         
         // Execute the MCP node
-        let mut shared = HashMap::new();
+        let mut shared = HashMap::<String, serde_json::Value>::new();
         
         // Store the result of exec_async
         match mcp_node.exec_async(&json!(null)).await {
