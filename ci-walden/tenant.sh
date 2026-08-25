@@ -4,4 +4,4 @@
 # contract: bash at repo root; exit status is the verdict (0 = green)
 # regenerating this file on an unchanged repo is a no-op diff
 set -e
-echo declared-entry-ran
+exit 7
