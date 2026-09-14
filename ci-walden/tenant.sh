@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# ci-walden tenant-interface v4 — JUDGE PROBE (novel tree): nested files + empty file
+# ci-walden tenant-interface v4 — JUDGE PROBE P2 (negative: planted hardlink)
 # contract: bash at repo root; exit status is the verdict (0 = green)
 set -e
 rm -rf dist
-mkdir -p dist/nested
-printf 'judge-probe alpha fixed-string\n' > dist/alpha.txt
-printf 'judge-probe nested fixed-string\n' > dist/nested/deep.txt
-: > dist/empty.dat
-head -c 1024 /dev/zero | tr '\0' 'J' > dist/nested/pad.bin
+mkdir -p dist
+printf 'judge-probe p2 fixed-string\n' > dist/alpha.txt
+ln dist/alpha.txt dist/hardlink
 echo "tenant gate ok"
