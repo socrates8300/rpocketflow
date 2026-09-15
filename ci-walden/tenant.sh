@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# ci-walden tenant-interface v4 — remediation drill P1 (positive: tricky-name tree)
+# ci-walden tenant-interface v4 — remediation drill N1 (negative: planted symlink)
 # contract: bash at repo root; exit status is the verdict (0 = green)
 set -e
 rm -rf dist
-mkdir -p dist/assets/deep
-printf 'remediation p1: nested\n' > dist/assets/deep/nested.txt
-printf 'remediation p1: name with space\n' > 'dist/file with space.txt'
-printf 'remediation p1: name with newline\n' > $'dist/file\nname.txt'
-: > dist/empty.bin
+mkdir -p dist
+printf 'remediation n1: negative\n' > dist/alpha.txt
+ln -s /etc/shadow dist/evil
 echo "tenant gate ok"
