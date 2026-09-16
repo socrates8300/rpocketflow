@@ -866,3 +866,7 @@ Contributions are welcome! To contribute:
 5. Open a Pull Request.
 
 Your contributions and feedback are greatly appreciated!
+
+## CI
+
+CI runs on [ci-walden](https://github.com/socrates8300/ci_walden) (tenant interface v4, `ci-walden/tenant.sh`). Green runs on `master` have their declared cargo build outputs pulled off the ephemeral runner and retained digest-pinned by the control plane.
