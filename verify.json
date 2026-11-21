@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "gate": "cargo check --all-targets",
+  "verify": "cargo check --all-targets && cargo test"
+}
